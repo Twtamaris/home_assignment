@@ -1,0 +1,50 @@
+{
+  "organisation": {
+    "id": "org_c",
+    "slug": "everest-gear",
+    "name": "Everest Outdoor Equipment",
+    "tagline": "Expedition-Grade Himalayan Trekking & Mountaineering Gear",
+    "primary_color": "#0f172a",
+    "secondary_color": "#1e293b",
+    "accent_color": "#0ea5e9",
+    "agent_name": "Pasang",
+    "agent_role": "Expedition Equipment Advisor",
+    "greeting": "Namaste! Welcome to Everest Outdoor Equipment. I can advise you on alpine gear, 8000m down suits, crampons, or assist with equipment orders and delivery. How may I prepare your expedition?"
+  },
+  "users": [
+    {
+      "id": "user_c1",
+      "org_id": "org_c",
+      "email": "climber@everest.test",
+      "password": "Password123!",
+      "name": "Karma Sherpa",
+      "role": "customer"
+    },
+    {
+      "id": "admin_c",
+      "org_id": "org_c",
+      "email": "admin@everest.test",
+      "password": "Password123!",
+      "name": "Everest Depot Admin",
+      "role": "admin"
+    }
+  ],
+  "products": [
+    {
+      "sku": "EG-DWN-01",
+      "name": "Himalayan 8000m Expedition Down Suit",
+      "category": "Apparel",
+      "price": 85000.0,
+      "stock": 8,
+      "description": "900-fill power hydrophobic goose down suit engineered for extreme sub-zero summit conditions."
+    },
+    {
+      "sku": "EG-ICE-01",
+      "name": "Titanium Technical Ice Axe (50cm)",
+      "category": "Hardware",
+      "price": 14500.0,
+      "stock": 20,
+      "description": "Ultra-lightweight hot-forged titanium alloy mountaineering ice axe with pick protector."
+    }
+  ]
+}

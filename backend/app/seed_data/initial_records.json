@@ -1,0 +1,376 @@
+{
+  "organisations": [
+    {
+      "id": "org_a",
+      "slug": "himali-tea",
+      "name": "Himali Tea House",
+      "tagline": "Single-Origin Orthodox Himalayan Teas",
+      "primary_color": "#1b4332",
+      "secondary_color": "#2d6a4f",
+      "accent_color": "#d4a373",
+      "agent_name": "Tenzin",
+      "agent_role": "Tea Specialist & Ordering Guide",
+      "greeting": "Namaste! Welcome to Himali Tea House. I can assist you with our single-origin orthodox teas, brewing guides, placing or editing orders, checking stock, and repeating your past favorites. How can I help you today?"
+    },
+    {
+      "id": "org_b",
+      "slug": "lotus-wellness",
+      "name": "Lotus Wellness Studio",
+      "tagline": "Mindful Healing, Physiotherapy & Holistic Bodywork",
+      "primary_color": "#2e1f47",
+      "secondary_color": "#4a3b68",
+      "accent_color": "#38b2ac",
+      "agent_name": "Maya",
+      "agent_role": "Wellness Coordinator",
+      "greeting": "Namaste! Welcome to Lotus Wellness Studio. I can assist you with service questions, booking appointments with Dr. Sunita, Master Tenzing, or Aarati, and managing your schedule in Asia/Kathmandu time (UTC+05:45). How may I support your wellness today?"
+    }
+  ],
+  "users": [
+    {
+      "id": "user_a1",
+      "org_id": "org_a",
+      "email": "aayush@himali.test",
+      "password": "Password123!",
+      "name": "Aayush Sharma",
+      "role": "customer"
+    },
+    {
+      "id": "user_a2",
+      "org_id": "org_a",
+      "email": "priya@himali.test",
+      "password": "Password123!",
+      "name": "Priya Adhikari",
+      "role": "customer"
+    },
+    {
+      "id": "user_a3",
+      "org_id": "org_a",
+      "email": "kiran@himali.test",
+      "password": "Password123!",
+      "name": "Kiran Thapa",
+      "role": "customer"
+    },
+    {
+      "id": "admin_a",
+      "org_id": "org_a",
+      "email": "admin@himali.test",
+      "password": "Password123!",
+      "name": "Himali Store Admin",
+      "role": "admin"
+    },
+    {
+      "id": "user_b1",
+      "org_id": "org_b",
+      "email": "rohan@lotus.test",
+      "password": "Password123!",
+      "name": "Rohan श्रेष्ठ",
+      "role": "customer"
+    },
+    {
+      "id": "user_b2",
+      "org_id": "org_b",
+      "email": "sita@lotus.test",
+      "password": "Password123!",
+      "name": "Sita Gurung",
+      "role": "customer"
+    },
+    {
+      "id": "user_b3",
+      "org_id": "org_b",
+      "email": "bikash@lotus.test",
+      "password": "Password123!",
+      "name": "Bikash Pandey",
+      "role": "customer"
+    },
+    {
+      "id": "admin_b",
+      "org_id": "org_b",
+      "email": "admin@lotus.test",
+      "password": "Password123!",
+      "name": "Lotus Studio Admin",
+      "role": "admin"
+    }
+  ],
+  "products": [
+    {
+      "sku": "HT-SN-100",
+      "name": "Himalayan Spring Silver Needle (100g)",
+      "category": "White Tea",
+      "price": 1850.0,
+      "stock": 35,
+      "description": "Exquisite hand-picked tender buds from 2200m Illam slopes with delicate notes of honeysuckle and melon."
+    },
+    {
+      "sku": "HT-GT-100",
+      "name": "Dhankuta Imperial Green Pearls (100g)",
+      "category": "Green Tea",
+      "price": 1200.0,
+      "stock": 50,
+      "description": "Tightly rolled emerald pearls uncurling into a fragrant toasted chestnut liquor with fresh vegetative sweetness."
+    },
+    {
+      "sku": "HT-OL-100",
+      "name": "Shangri-La High Mountain Oolong (100g)",
+      "category": "Oolong Tea",
+      "price": 1600.0,
+      "stock": 40,
+      "description": "Semi-oxidized medium roast oolong revealing honeyed peach, orchid blooms, and a buttery velvet finish."
+    },
+    {
+      "sku": "HT-BT-100",
+      "name": "Golden Tippy Orthodox Black Tea (100g)",
+      "category": "Black Tea",
+      "price": 950.0,
+      "stock": 65,
+      "description": "Abundant golden tips offering a robust, malty body with ripe plum and cocoa undertones."
+    },
+    {
+      "sku": "HT-MC-200",
+      "name": "Mount Everest Spiced Masala Chai (200g)",
+      "category": "Blended Tea",
+      "price": 650.0,
+      "stock": 120,
+      "description": "High-grown CTC black tea blended with green cardamom, ginger, cinnamon, clove, and black pepper."
+    },
+    {
+      "sku": "HT-LT-100",
+      "name": "Wild Lemongrass Ginger Tisane (100g)",
+      "category": "Herbal Tisane",
+      "price": 750.0,
+      "stock": 45,
+      "description": "Naturally caffeine-free calming herbal blend of wild Himalayan lemongrass and sun-dried organic ginger root."
+    },
+    {
+      "sku": "HT-CM-100",
+      "name": "Himalayan Chamomile Mint Infusion (100g)",
+      "category": "Herbal Tisane",
+      "price": 850.0,
+      "stock": 30,
+      "description": "Whole chamomile blossoms paired with soothing mountain peppermint for restful evening relaxation."
+    },
+    {
+      "sku": "HT-TC-100",
+      "name": "Sacred Tulsi Cardamom Nectar (100g)",
+      "category": "Herbal Tisane",
+      "price": 800.0,
+      "stock": 40,
+      "description": "A holy blend of Rama and Krishna Tulsi holy basil infused with green cardamom pods."
+    },
+    {
+      "sku": "HT-RO-100",
+      "name": "Ruby Roasted Reserve Oolong (100g)",
+      "category": "Oolong Tea",
+      "price": 1950.0,
+      "stock": 25,
+      "description": "Charcoal roasted master batch yielding deep caramel, dried longan, and warm spice complexity."
+    },
+    {
+      "sku": "HT-SB-100",
+      "name": "Monsoon Mist Smoked Black Tea (100g)",
+      "category": "Black Tea",
+      "price": 1100.0,
+      "stock": 35,
+      "description": "Gently pine-smoked over local cedarwood, evoking campfires under mist-veiled Himalayan pine ridges."
+    },
+    {
+      "sku": "HT-FF-100",
+      "name": "First Flush Heritage Muscatel (100g)",
+      "category": "Black Tea",
+      "price": 2200.0,
+      "stock": 20,
+      "description": "Prized spring harvest bursting with bright Muscat grape notes, brisk citrus, and luminous golden liquor."
+    },
+    {
+      "sku": "HT-SF-100",
+      "name": "Second Flush Amber Delight (100g)",
+      "category": "Black Tea",
+      "price": 1450.0,
+      "stock": 55,
+      "description": "Summer harvested leaves with full-bodied fruity sweetness, ripe peach aroma, and smooth copper finish."
+    },
+    {
+      "sku": "HT-WP-100",
+      "name": "High Altitude White Peony (100g)",
+      "category": "White Tea",
+      "price": 1350.0,
+      "stock": 30,
+      "description": "One bud and two leaves, yielding sweet clover blossom aroma with a clean lingering floral sweetness."
+    },
+    {
+      "sku": "HT-ET-100",
+      "name": "Himalayan Earl Grey with Wild Bergamot (100g)",
+      "category": "Blended Tea",
+      "price": 900.0,
+      "stock": 60,
+      "description": "Full leaf black tea infused with natural cold-pressed Italian bergamot essential oil and blue cornflowers."
+    },
+    {
+      "sku": "HT-RH-100",
+      "name": "Rhododendron Wildberry Tisane (100g)",
+      "category": "Herbal Tisane",
+      "price": 950.0,
+      "stock": 28,
+      "description": "Vibrant red national flower petals blended with dried wild mulberries and sea buckthorn."
+    },
+    {
+      "sku": "HT-GW-01",
+      "name": "Handcrafted Celadon Ceramic Gaiwan (150ml)",
+      "category": "Teaware",
+      "price": 2400.0,
+      "stock": 15,
+      "description": "Artisan wheel-thrown ceramic gaiwan with jade crackle glaze, perfect for gongfu tea tasting."
+    },
+    {
+      "sku": "HT-GL-01",
+      "name": "Double-Walled Glass Tumbler with Infuser (350ml)",
+      "category": "Teaware",
+      "price": 1750.0,
+      "stock": 25,
+      "description": "Heat-resistant borosilicate travel tumbler featuring a removable 304 stainless steel infuser."
+    },
+    {
+      "sku": "HT-BT-01",
+      "name": "Carved Bamboo Gongfu Tea Tray",
+      "category": "Teaware",
+      "price": 3800.0,
+      "stock": 12,
+      "description": "Natural aged bamboo tea brewing table with integrated water drainage tray and pipe attachment."
+    },
+    {
+      "sku": "HT-CP-01",
+      "name": "Cast Iron Hobnail Teapot (600ml)",
+      "category": "Teaware",
+      "price": 4500.0,
+      "stock": 8,
+      "description": "Heavy enamelled interior cast iron teapot providing extraordinary heat retention for dark teas."
+    },
+    {
+      "sku": "HT-SC-01",
+      "name": "Precision Digital Tea Gram Scale (0.01g)",
+      "category": "Teaware",
+      "price": 1600.0,
+      "stock": 18,
+      "description": "Compact backlit digital micro-scale for exact tea leaf dose and water ratio measurement."
+    },
+    {
+      "sku": "HT-IN-01",
+      "name": "Stainless Steel Ultra-Fine Mesh Infuser",
+      "category": "Teaware",
+      "price": 650.0,
+      "stock": 50,
+      "description": "Deep-basket universal mug infuser with fold-out dual handles and drip catch saucer."
+    },
+    {
+      "sku": "HT-OR-99",
+      "name": "Vintage 2015 Aged Himalayan Pu-erh Cake (357g)",
+      "category": "Specialty Reserve",
+      "price": 8500.0,
+      "stock": 2,
+      "description": "Collector item: fermented raw puerh pressed disc aged 9 years in clean mountain air."
+    }
+  ],
+  "services": [
+    {
+      "id": "srv_1",
+      "name": "Deep Tissue Therapeutic Massage",
+      "duration_minutes": 60,
+      "price": 3500.0,
+      "description": "Targeted myofascial release aimed at chronic muscular tension, postural strain, and athletic tightness."
+    },
+    {
+      "id": "srv_2",
+      "name": "Ayurvedic Abhyanga Restorative Massage",
+      "duration_minutes": 90,
+      "price": 4800.0,
+      "description": "Full-body synchronized warm herbal oil treatment restoring Vata-Pitta equilibrium and lymphatic flow."
+    },
+    {
+      "id": "srv_3",
+      "name": "Sports Physiotherapy Assessment & Rehab",
+      "duration_minutes": 45,
+      "price": 3000.0,
+      "description": "Clinical musculoskeletal evaluation, functional movement screening, and corrective exercise program."
+    },
+    {
+      "id": "srv_4",
+      "name": "Dry Needling & Trigger Point Therapy",
+      "duration_minutes": 45,
+      "price": 2800.0,
+      "description": "Acupuncture needle deactivation of myofascial trigger points to relieve neuromuscular referral pain."
+    },
+    {
+      "id": "srv_5",
+      "name": "Private 1-on-1 Hatha & Vinyasa Yoga",
+      "duration_minutes": 60,
+      "price": 2500.0,
+      "description": "Personalized yoga instruction calibrated to individual biomechanics, flexibility, and pranayama."
+    },
+    {
+      "id": "srv_6",
+      "name": "Sound Bath & Tibetan Singing Bowl Therapy",
+      "duration_minutes": 60,
+      "price": 3200.0,
+      "description": "Deep acoustic vibrational therapy inducing healing theta-brainwave states and nervous system calm."
+    },
+    {
+      "id": "srv_7",
+      "name": "Himalayan Herbal Steam & Scrub",
+      "duration_minutes": 75,
+      "price": 4000.0,
+      "description": "Organic walnut shell and juniper berry scrub followed by private detoxifying eucalyptus steam."
+    }
+  ],
+  "practitioners": [
+    {
+      "id": "prac_1",
+      "name": "Dr. Sunita Shrestha",
+      "title": "Senior Physiotherapist",
+      "specialties": ["Sports Physiotherapy Assessment & Rehab", "Dry Needling & Trigger Point Therapy"],
+      "bio": "11 years clinical experience treating athletes, post-surgical recovery, and spinal biomechanics."
+    },
+    {
+      "id": "prac_2",
+      "name": "Master Tenzing Norbu",
+      "title": "Senior Bodywork Therapist",
+      "specialties": ["Deep Tissue Therapeutic Massage", "Ayurvedic Abhyanga Restorative Massage", "Himalayan Herbal Steam & Scrub"],
+      "bio": "14 years experience specializing in neuromuscular myofascial release and traditional Ayurvedic healing."
+    },
+    {
+      "id": "prac_3",
+      "name": "Aarati Maharjan",
+      "title": "Master Yoga & Sound Instructor",
+      "specialties": ["Private 1-on-1 Hatha & Vinyasa Yoga", "Sound Bath & Tibetan Singing Bowl Therapy"],
+      "bio": "8 years guiding restorative breathwork, Hatha alignment, and Himalayan singing bowl sound healing."
+    }
+  ],
+  "opening_hours": {
+    "timezone": "Asia/Kathmandu",
+    "schedule": {
+      "Monday": { "open": "08:00", "close": "19:00" },
+      "Tuesday": { "open": "08:00", "close": "19:00" },
+      "Wednesday": { "open": "08:00", "close": "19:00" },
+      "Thursday": { "open": "08:00", "close": "19:00" },
+      "Friday": { "open": "08:00", "close": "19:00" },
+      "Saturday": { "open": "09:00", "close": "18:00" },
+      "Sunday": { "open": "10:00", "close": "16:00" }
+    }
+  },
+  "holidays": [
+    {
+      "date": "2026-11-08",
+      "name": "Bhai Tika (Tihar Festival Closure)"
+    },
+    {
+      "date": "2026-11-09",
+      "name": "Chhath Puja Special Holiday"
+    },
+    {
+      "date": "2026-12-25",
+      "name": "Christmas Day Studio Maintenance"
+    },
+    {
+      "date": "2027-01-01",
+      "name": "International New Year Holiday"
+    }
+  ]
+}

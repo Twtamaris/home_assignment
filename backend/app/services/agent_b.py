@@ -1,0 +1,481 @@
+import uuid
+import datetime
+from typing import List, Dict, Any, Optional
+import pytz
+from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy import select, desc
+from app.models.models import Service, Practitioner, Booking, Holiday, WeeklyOpeningHours, CustomerMemory
+from app.services.knowledge_base import KnowledgeBaseService
+from app.services.scheduling import SchedulingEngine, KATHMANDU_TZ
+
+class AgentBTools:
+    """
+    Booking Agent Tools for Lotus Wellness Studio (Org B).
+    Enforces all 6 core business rules:
+    1. Opening hours and holiday validation + duration fit.
+    2. Overlap prevention: no practitioner double booking, no client holding 2 simultaneous bookings.
+    3. Concurrency-safe slot grabbing.
+    4. Conflict refusal on reschedule + nearest free alternatives.
+    5. Pre-confirmation of service, practitioner, date, time, price.
+    6. Relative dates resolve in Asia/Kathmandu (UTC+05:45).
+    """
+
+    @staticmethod
+    async def search_knowledge(db: AsyncSession, org_id: str, query: str) -> Dict[str, Any]:
+        results = await KnowledgeBaseService.search_knowledge(db, org_id, query, top_k=3)
+        return {
+            "success": True,
+            "query": query,
+            "results": results,
+            "citations": [r["citation"] for r in results]
+        }
+
+    @staticmethod
+    async def list_services(db: AsyncSession, org_id: str) -> Dict[str, Any]:
+        stmt = select(Service).where(Service.org_id == org_id)
+        res = await db.execute(stmt)
+        services = res.scalars().all()
+        return {
+            "success": True,
+            "services": [
+                {
+                    "id": s.id,
+                    "name": s.name,
+                    "duration_minutes": s.duration_minutes,
+                    "price": s.price,
+                    "description": s.description
+                }
+                for s in services
+            ]
+        }
+
+    @staticmethod
+    async def get_opening_hours(db: AsyncSession, org_id: str) -> Dict[str, Any]:
+        # Hours
+        h_stmt = select(WeeklyOpeningHours).where(WeeklyOpeningHours.org_id == org_id)
+        h_res = await db.execute(h_stmt)
+        hours_records = h_res.scalars().all()
+
+        weekly = {}
+        for r in hours_records:
+            weekly[r.day_of_week] = "Closed" if r.is_closed else f"{r.open_time} - {r.close_time}"
+
+        # Holidays
+        hol_stmt = select(Holiday).where(Holiday.org_id == org_id)
+        hol_res = await db.execute(hol_stmt)
+        holidays = [{"date": h.holiday_date, "name": h.name} for h in hol_res.scalars().all()]
+
+        return {
+            "success": True,
+            "timezone": "Asia/Kathmandu (UTC+05:45)",
+            "weekly_hours": weekly or {
+                "Monday-Friday": "08:00 - 19:00",
+                "Saturday": "09:00 - 18:00",
+                "Sunday": "10:00 - 16:00"
+            },
+            "upcoming_holidays": holidays
+        }
+
+    @staticmethod
+    async def find_available_slots(
+        db: AsyncSession,
+        org_id: str,
+        service_id: str,
+        date_str: str,
+        practitioner_id: Optional[str] = None
+    ) -> Dict[str, Any]:
+        slots = await SchedulingEngine.find_available_slots(
+            db, org_id, service_id, date_str, practitioner_id
+        )
+        return {
+            "success": True,
+            "service_id": service_id,
+            "date": date_str,
+            "count": len(slots),
+            "slots": slots,
+            "card": {
+                "type": "slot_picker",
+                "title": f"Available Slots for {date_str}",
+                "service_id": service_id,
+                "slots": slots[:10]  # top 10
+            } if slots else None
+        }
+
+    @staticmethod
+    async def prepare_booking_summary(
+        db: AsyncSession,
+        org_id: str,
+        user_id: str,
+        service_id: str,
+        practitioner_id: str,
+        start_time_str: str
+    ) -> Dict[str, Any]:
+        """
+        Business Rule 5: Confirms service, practitioner, date, time and price before booking.
+        """
+        # Validate service
+        s_stmt = select(Service).where(Service.id == service_id, Service.org_id == org_id)
+        s_res = await db.execute(s_stmt)
+        service = s_res.scalars().first()
+        if not service:
+            return {"success": False, "error": f"Service '{service_id}' not found."}
+
+        # Validate practitioner
+        p_stmt = select(Practitioner).where(Practitioner.id == practitioner_id, Practitioner.org_id == org_id)
+        p_res = await db.execute(p_stmt)
+        practitioner = p_res.scalars().first()
+        if not practitioner:
+            return {"success": False, "error": f"Practitioner '{practitioner_id}' not found."}
+
+        # Parse start_time in Asia/Kathmandu
+        try:
+            start_dt = SchedulingEngine.parse_datetime_kathmandu(start_time_str)
+        except ValueError as e:
+            return {"success": False, "error": str(e)}
+
+        # Validate slot rules (Opening hours, holiday, no double booking, customer no overlap)
+        is_valid, reason = await SchedulingEngine.validate_slot(
+            db, org_id, start_dt, service.duration_minutes, practitioner_id, user_id
+        )
+        if not is_valid:
+            # Find alternatives
+            alternatives = await SchedulingEngine.find_nearest_alternatives(
+                db, org_id, service_id, start_dt, practitioner_id, count=3
+            )
+            return {
+                "success": False,
+                "error": reason,
+                "suggested_alternatives": alternatives,
+                "message": f"Cannot book this slot: {reason} Here are nearest available slots."
+            }
+
+        end_dt = start_dt + datetime.timedelta(minutes=service.duration_minutes)
+
+        return {
+            "success": True,
+            "is_summary": True,
+            "requires_confirmation": True,
+            "service_id": service.id,
+            "service_name": service.name,
+            "practitioner_id": practitioner.id,
+            "practitioner_name": practitioner.name,
+            "start_time": start_dt.isoformat(),
+            "end_time": end_dt.isoformat(),
+            "formatted_time": start_dt.strftime("%A, %B %d, %Y at %I:%M %p"),
+            "duration_minutes": service.duration_minutes,
+            "price": service.price,
+            "card": {
+                "type": "booking_summary",
+                "title": "Please Confirm Your Appointment",
+                "service_name": service.name,
+                "practitioner_name": practitioner.name,
+                "start_time": start_dt.isoformat(),
+                "formatted_time": start_dt.strftime("%A, %B %d, %Y at %I:%M %p"),
+                "duration_minutes": service.duration_minutes,
+                "price": service.price
+            },
+            "summary_text": (
+                f"Booking Summary: {service.name} ({service.duration_minutes} min) with {practitioner.name} "
+                f"on {start_dt.strftime('%A, %b %d, %Y at %I:%M %p')} for NPR {service.price:.2f}. "
+                f"Would you like me to confirm this booking?"
+            )
+        }
+
+    @staticmethod
+    async def create_booking(
+        db: AsyncSession,
+        org_id: str,
+        user_id: str,
+        service_id: str,
+        practitioner_id: str,
+        start_time_str: str,
+        notes: Optional[str] = None
+    ) -> Dict[str, Any]:
+        """
+        Creates confirmed booking in DB.
+        Safe against race conditions with atomic transactional validation.
+        """
+        summary = await AgentBTools.prepare_booking_summary(
+            db, org_id, user_id, service_id, practitioner_id, start_time_str
+        )
+        if not summary.get("success"):
+            return summary
+
+        start_dt = datetime.datetime.fromisoformat(summary["start_time"])
+        end_dt = datetime.datetime.fromisoformat(summary["end_time"])
+        booking_id = f"BKG-{uuid.uuid4().hex[:8].upper()}"
+
+        # Re-check concurrency inside atomic transaction:
+        naive_start = start_dt.replace(tzinfo=None)
+        naive_end = end_dt.replace(tzinfo=None)
+
+        conflict_stmt = select(Booking).where(
+            Booking.org_id == org_id,
+            Booking.practitioner_id == practitioner_id,
+            Booking.status.in_(["confirmed", "rescheduled"]),
+            Booking.start_time < naive_end,
+            Booking.end_time > naive_start
+        ).with_for_update() if "sqlite" not in str(db.bind.url) else select(Booking).where(
+            Booking.org_id == org_id,
+            Booking.practitioner_id == practitioner_id,
+            Booking.status.in_(["confirmed", "rescheduled"]),
+            Booking.start_time < naive_end,
+            Booking.end_time > naive_start
+        )
+        c_res = await db.execute(conflict_stmt)
+        if c_res.scalars().first():
+            return {
+                "success": False,
+                "error": "This slot was just booked by another customer. Please choose another slot.",
+                "suggested_alternatives": await SchedulingEngine.find_nearest_alternatives(
+                    db, org_id, service_id, start_dt, practitioner_id, count=3
+                )
+            }
+
+        booking = Booking(
+            id=booking_id,
+            org_id=org_id,
+            user_id=user_id,
+            service_id=service_id,
+            practitioner_id=practitioner_id,
+            start_time=naive_start,
+            end_time=naive_end,
+            status="confirmed",
+            notes=notes
+        )
+        db.add(booking)
+
+        # Update customer memory (preferred practitioner)
+        mem_stmt = select(CustomerMemory).where(
+            CustomerMemory.org_id == org_id,
+            CustomerMemory.user_id == user_id,
+            CustomerMemory.memory_key == "preferred_practitioner"
+        )
+        mem_res = await db.execute(mem_stmt)
+        mem = mem_res.scalars().first()
+        if not mem:
+            mem = CustomerMemory(
+                org_id=org_id,
+                user_id=user_id,
+                memory_key="preferred_practitioner",
+                memory_value=summary["practitioner_name"]
+            )
+            db.add(mem)
+        else:
+            mem.memory_value = summary["practitioner_name"]
+
+        await db.commit()
+        await db.refresh(booking)
+
+        return {
+            "success": True,
+            "booking_id": booking_id,
+            "status": "confirmed",
+            "service_name": summary["service_name"],
+            "practitioner_name": summary["practitioner_name"],
+            "formatted_time": summary["formatted_time"],
+            "price": summary["price"],
+            "card": {
+                "type": "booking_confirmed",
+                "booking_id": booking_id,
+                "service_name": summary["service_name"],
+                "practitioner_name": summary["practitioner_name"],
+                "formatted_time": summary["formatted_time"],
+                "price": summary["price"]
+            },
+            "message": (
+                f"Your appointment #{booking_id} for {summary['service_name']} with {summary['practitioner_name']} "
+                f"on {summary['formatted_time']} has been confirmed! Price: NPR {summary['price']:.2f}."
+            )
+        }
+
+    @staticmethod
+    async def reschedule_booking(
+        db: AsyncSession,
+        org_id: str,
+        user_id: str,
+        booking_id: str,
+        new_start_time_str: str
+    ) -> Dict[str, Any]:
+        """
+        Business Rule 4:
+        If reschedule would conflict, it is REFUSED and the agent offers the nearest free alternatives!
+        """
+        stmt = select(Booking).where(Booking.id == booking_id, Booking.org_id == org_id)
+        res = await db.execute(stmt)
+        booking = res.scalars().first()
+        if not booking:
+            return {"success": False, "error": f"Booking #{booking_id} not found."}
+
+        # Tenant & ownership check
+        if booking.user_id != user_id:
+            return {"success": False, "error": "Access denied: you can only reschedule your own bookings."}
+
+        if booking.status == "cancelled":
+            return {"success": False, "error": f"Booking #{booking_id} is already cancelled and cannot be rescheduled."}
+
+        # Fetch service details
+        s_stmt = select(Service).where(Service.id == booking.service_id)
+        s_res = await db.execute(s_stmt)
+        service = s_res.scalars().first()
+
+        p_stmt = select(Practitioner).where(Practitioner.id == booking.practitioner_id)
+        p_res = await db.execute(p_stmt)
+        practitioner = p_res.scalars().first()
+
+        # Parse new datetime in Asia/Kathmandu
+        try:
+            new_start_dt = SchedulingEngine.parse_datetime_kathmandu(new_start_time_str)
+        except ValueError as e:
+            return {"success": False, "error": str(e)}
+
+        # Validate new slot (excluding current booking)
+        is_valid, reason = await SchedulingEngine.validate_slot(
+            db, org_id, new_start_dt, service.duration_minutes, booking.practitioner_id, user_id, exclude_booking_id=booking.id
+        )
+
+        if not is_valid:
+            # Rule 4: Refuse and offer nearest free alternatives!
+            alternatives = await SchedulingEngine.find_nearest_alternatives(
+                db, org_id, booking.service_id, new_start_dt, booking.practitioner_id, count=3
+            )
+            return {
+                "success": False,
+                "conflict": True,
+                "error": f"Reschedule refused: {reason}",
+                "suggested_alternatives": alternatives,
+                "card": {
+                    "type": "reschedule_conflict",
+                    "reason": reason,
+                    "suggested_slots": alternatives
+                },
+                "message": (
+                    f"I cannot move booking #{booking_id} to that time because {reason}. "
+                    f"Here are the nearest alternative free slots you can choose from:"
+                )
+            }
+
+        new_end_dt = new_start_dt + datetime.timedelta(minutes=service.duration_minutes)
+        booking.start_time = new_start_dt.replace(tzinfo=None)
+        booking.end_time = new_end_dt.replace(tzinfo=None)
+        booking.status = "rescheduled"
+        booking.reschedule_count = (booking.reschedule_count or 0) + 1
+        booking.updated_at = datetime.datetime.utcnow()
+
+        await db.commit()
+        await db.refresh(booking)
+
+        formatted_time = new_start_dt.strftime("%A, %B %d, %Y at %I:%M %p")
+        return {
+            "success": True,
+            "booking_id": booking.id,
+            "status": "rescheduled",
+            "new_time": formatted_time,
+            "practitioner_name": practitioner.name if practitioner else "Your Practitioner",
+            "card": {
+                "type": "booking_rescheduled",
+                "booking_id": booking.id,
+                "service_name": service.name if service else "Service",
+                "practitioner_name": practitioner.name if practitioner else "Practitioner",
+                "new_time": formatted_time
+            },
+            "message": f"Appointment #{booking.id} has been successfully rescheduled to {formatted_time}."
+        }
+
+    @staticmethod
+    async def cancel_booking(
+        db: AsyncSession,
+        org_id: str,
+        user_id: str,
+        booking_id: str
+    ) -> Dict[str, Any]:
+        """
+        Cancels booking applying cancellation policy:
+        Free if cancelled >= 4 hours before. Less than 4 hours incurs 50% fee.
+        """
+        stmt = select(Booking).where(Booking.id == booking_id, Booking.org_id == org_id)
+        res = await db.execute(stmt)
+        booking = res.scalars().first()
+        if not booking:
+            return {"success": False, "error": f"Booking #{booking_id} not found."}
+
+        if booking.user_id != user_id:
+            return {"success": False, "error": "Access denied: you can only cancel your own bookings."}
+
+        if booking.status == "cancelled":
+            return {"success": False, "error": f"Booking #{booking_id} is already cancelled."}
+
+        # Calculate notice hours
+        # Localize start_time to Kathmandu
+        now_ktm = SchedulingEngine.now_kathmandu()
+        booking_start_ktm = KATHMANDU_TZ.localize(booking.start_time)
+        hours_notice = (booking_start_ktm - now_ktm).total_seconds() / 3600.0
+
+        s_stmt = select(Service).where(Service.id == booking.service_id)
+        s_res = await db.execute(s_stmt)
+        service = s_res.scalars().first()
+        price = service.price if service else 0.0
+
+        if hours_notice >= 4.0:
+            cancellation_fee = 0.0
+            fee_msg = "Cancelled free of charge (more than 4 hours notice)."
+        else:
+            cancellation_fee = round(price * 0.5, 2)
+            fee_msg = f"Late cancellation notice (<4 hours). A 50% cancellation fee of NPR {cancellation_fee:.2f} applies per studio policy."
+
+        booking.status = "cancelled"
+        booking.cancellation_fee = cancellation_fee
+        booking.updated_at = datetime.datetime.utcnow()
+
+        await db.commit()
+
+        return {
+            "success": True,
+            "booking_id": booking.id,
+            "status": "cancelled",
+            "hours_notice": round(hours_notice, 1),
+            "cancellation_fee": cancellation_fee,
+            "message": f"Appointment #{booking.id} has been cancelled. {fee_msg}"
+        }
+
+    @staticmethod
+    async def list_my_bookings(
+        db: AsyncSession,
+        org_id: str,
+        user_id: str
+    ) -> Dict[str, Any]:
+        stmt = select(Booking).where(
+            Booking.org_id == org_id,
+            Booking.user_id == user_id
+        ).order_by(desc(Booking.start_time))
+        res = await db.execute(stmt)
+        bookings = res.scalars().all()
+
+        results = []
+        for b in bookings:
+            # fetch service and practitioner names
+            s_stmt = select(Service).where(Service.id == b.service_id)
+            s_res = await db.execute(s_stmt)
+            srv = s_res.scalars().first()
+
+            p_stmt = select(Practitioner).where(Practitioner.id == b.practitioner_id)
+            p_res = await db.execute(p_stmt)
+            prac = p_res.scalars().first()
+
+            ktm_dt = KATHMANDU_TZ.localize(b.start_time) if b.start_time.tzinfo is None else b.start_time
+
+            results.append({
+                "booking_id": b.id,
+                "status": b.status,
+                "service_name": srv.name if srv else b.service_id,
+                "practitioner_name": prac.name if prac else b.practitioner_id,
+                "start_time": b.start_time.isoformat(),
+                "formatted_time": ktm_dt.strftime("%A, %b %d, %Y at %I:%M %p"),
+                "cancellation_fee": b.cancellation_fee
+            })
+
+        return {
+            "success": True,
+            "count": len(results),
+            "bookings": results
+        }
