@@ -9,7 +9,7 @@ help:
 	@echo "  make setup         Install backend and frontend dependencies"
 	@echo "  make seed          Rebuild database and knowledge bases from seed files"
 	@echo "  make test          Run pytest tenant isolation assertions"
-	@echo "  make eval          Run the 38-scenario eval suite and verify DB state"
+	@echo "  make eval          Run the 43-scenario eval suite and verify DB state"
 	@echo "  make run-backend   Start FastAPI uvicorn server (port 8000)"
 	@echo "  make run-frontend  Start Vite development server (port 3000)"
 	@echo "  make advance-order Advance order status: make advance-order ID=ORD-1003 STATUS=confirmed"
