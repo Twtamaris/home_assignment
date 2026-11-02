@@ -193,7 +193,7 @@ class SchedulingEngine:
 
         res = await db.execute(prac_query)
         if res.scalars().first():
-            return False, f"Practitioner is already booked during this time window."
+            return False, "Practitioner is already booked during this time window (booked by another customer)."
 
         # 4. Customer overlap check (customer cannot hold two bookings at the same time)
         cust_query = select(Booking).where(

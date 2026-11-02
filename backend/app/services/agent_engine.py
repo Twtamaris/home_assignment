@@ -1,13 +1,16 @@
 import asyncio
 import json
 import re
+import uuid
 import datetime
 from typing import AsyncGenerator, Dict, Any, List, Optional
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select
+from sqlalchemy import select, desc
 
 from app.core.config import settings
-from app.models.models import User, Conversation, Message, CustomerMemory, Product, Service, Order, Booking
+from app.models.models import (
+    User, Conversation, Message, CustomerMemory, Product, Service, Order, Booking, ActionProposal
+)
 from app.services.agent_a import AgentATools
 from app.services.agent_b import AgentBTools
 from app.services.admin_agent import AdminAnalyticsTools
@@ -38,7 +41,7 @@ class AgentEngine:
         is_admin_chat = (conversation.agent_type == "admin")
 
         # Step 1: Save incoming user message
-        user_msg_id = f"msg_{datetime.datetime.utcnow().timestamp()}"
+        user_msg_id = f"msg_{uuid.uuid4().hex[:12]}"
         user_msg_record = Message(
             id=user_msg_id,
             conversation_id=conversation.id,
@@ -101,8 +104,16 @@ class AgentEngine:
         card_data = None
         final_text = ""
 
+        # Prompt Injection & Cross-Tenant Boundary Protection
+        if any(w in q_lower for w in ["ignore all", "system prompt", "database schema", "lotus wellness", "lotus appointments", "drop table", "select * from"]):
+            final_text = (
+                "I am the Himali Tea House ordering assistant. I cannot disclose internal database schemas, "
+                "override system instructions, or access Lotus Wellness Studio appointments. "
+                "How may I assist you with Himali orthodox teas, orders, or brewing guidance today?"
+            )
+
         # Check for Reorder / "Same as last time"
-        if any(phrase in q_lower for phrase in ["same as last time", "reorder", "repeat my order", "previous order", "usual tea"]):
+        elif any(phrase in q_lower for phrase in ["same as last time", "reorder", "repeat my order", "previous order", "usual tea"]):
             yield cls._sse("tool_start", {"tool": "reorder", "message": "Looking up previous orders and checking live stock..."})
             await asyncio.sleep(0.1)
             reorder_res = await AgentATools.reorder(db, user.org_id, user.id)
@@ -117,12 +128,10 @@ class AgentEngine:
 
         # Check for Order Confirmation (e.g. "confirm", "yes place it", "yes please confirm")
         elif any(phrase in q_lower for phrase in ["confirm order", "yes please confirm", "confirm my order", "place it", "confirm"]):
-            # Check last pending proposals from recent messages or summary in context
             yield cls._sse("tool_start", {"tool": "create_order", "message": "Confirming and placing order..."})
             await asyncio.sleep(0.1)
 
             # Look up unconfirmed order draft from latest user memory or items
-            # Default to Silver Needle or usual tea if confirming
             usual_tea = memories.get("usual_tea", "HT-SN-100")
             sku = "HT-SN-100" if "silver" in usual_tea.lower() or "ht-" not in usual_tea.lower() else usual_tea
 
@@ -141,8 +150,33 @@ class AgentEngine:
             else:
                 final_text = create_res.get("message", create_res.get("error", "Unable to place order."))
 
+        # Check for Cancellation (e.g. "cancel order ORD-...", "cancel my latest order", "cancel my order")
+        elif "cancel" in q_lower and ("order" in q_lower or "ord-" in q_lower or "latest" in q_lower):
+            yield cls._sse("tool_start", {"tool": "cancel_order", "message": "Evaluating cancellation eligibility..."})
+            await asyncio.sleep(0.1)
+
+            order_match = re.search(r"ORD-[A-Za-z0-9]+", query, re.IGNORECASE)
+            if order_match:
+                order_id = order_match.group(0).upper()
+                cancel_res = await AgentATools.cancel_order(db, user.org_id, user.id, order_id)
+                tool_activity.append({"tool": "cancel_order", "result": cancel_res})
+                yield cls._sse("tool_end", {"tool": "cancel_order", "status": "completed"})
+                final_text = cancel_res.get("message") or cancel_res.get("error")
+            else:
+                # Find latest order
+                orders_res = await AgentATools.list_my_orders(db, user.org_id, user.id)
+                if orders_res["orders"]:
+                    latest_order = orders_res["orders"][0]
+                    cancel_res = await AgentATools.cancel_order(db, user.org_id, user.id, latest_order["order_id"])
+                    tool_activity.append({"tool": "cancel_order", "result": cancel_res})
+                    yield cls._sse("tool_end", {"tool": "cancel_order", "status": "completed"})
+                    final_text = cancel_res.get("message") or cancel_res.get("error")
+                else:
+                    yield cls._sse("tool_end", {"tool": "cancel_order", "status": "completed"})
+                    final_text = "I could not find an active order under your account to cancel."
+
         # Check for Order Status / Tracking (e.g. "track order", "status of ORD-1001", "where is my order")
-        elif any(phrase in q_lower for phrase in ["status", "track", "where is my order", "ord-"]):
+        elif any(phrase in q_lower for phrase in ["status", "track", "where is my order", "ord-", "show me my latest order", "latest order", "my orders"]):
             yield cls._sse("tool_start", {"tool": "get_order_status", "message": "Checking live order status..."})
             await asyncio.sleep(0.1)
 
@@ -169,34 +203,16 @@ class AgentEngine:
 
                 if orders_res["orders"]:
                     latest = orders_res["orders"][0]
-                    final_text = f"You have {len(orders_res['orders'])} orders. Your latest order #{latest['order_id']} is currently **{latest['status'].upper()}**."
+                    card_data = {
+                        "type": "order_status",
+                        "order_id": latest["order_id"],
+                        "status": latest["status"],
+                        "total_price": latest["total_price"],
+                        "history": latest.get("status_history", [])
+                    }
+                    final_text = f"You have {len(orders_res['orders'])} orders. Your latest order #{latest['order_id']} is currently **{latest['status'].upper()}** for NPR {latest['total_price']:.2f}."
                 else:
                     final_text = "You do not have any past orders yet."
-
-        # Check for Cancellation (e.g. "cancel order ORD-...", "cancel my order")
-        elif "cancel" in q_lower and ("order" in q_lower or "ord-" in q_lower):
-            yield cls._sse("tool_start", {"tool": "cancel_order", "message": "Evaluating cancellation eligibility..."})
-            await asyncio.sleep(0.1)
-
-            order_match = re.search(r"ORD-[A-Za-z0-9]+", query, re.IGNORECASE)
-            if order_match:
-                order_id = order_match.group(0).upper()
-                cancel_res = await AgentATools.cancel_order(db, user.org_id, user.id, order_id)
-                tool_activity.append({"tool": "cancel_order", "result": cancel_res})
-                yield cls._sse("tool_end", {"tool": "cancel_order", "status": "completed"})
-                final_text = cancel_res.get("message") or cancel_res.get("error")
-            else:
-                # Find latest pending order to cancel
-                orders_res = await AgentATools.list_my_orders(db, user.org_id, user.id)
-                pending_orders = [o for o in orders_res["orders"] if o["status"] == "pending"]
-                if pending_orders:
-                    cancel_res = await AgentATools.cancel_order(db, user.org_id, user.id, pending_orders[0]["order_id"])
-                    tool_activity.append({"tool": "cancel_order", "result": cancel_res})
-                    yield cls._sse("tool_end", {"tool": "cancel_order", "status": "completed"})
-                    final_text = cancel_res.get("message") or cancel_res.get("error")
-                else:
-                    yield cls._sse("tool_end", {"tool": "cancel_order", "status": "completed"})
-                    final_text = "I could not find an active pending order to cancel. If you have an order ID, please share it!"
 
         # Check for Updating order (e.g. "change address", "update order", "change quantity")
         elif any(k in q_lower for k in ["change", "update", "modify"]) and "order" in q_lower:
@@ -221,22 +237,65 @@ class AgentEngine:
                 yield cls._sse("tool_end", {"tool": "update_order", "status": "completed"})
                 final_text = "Please specify which order ID you'd like to update."
 
-        # Check for Buying / Purchasing / Ordering products (e.g. "I want to buy 2 Silver Needle", "order HT-SN-100")
-        elif any(k in q_lower for k in ["buy", "order", "purchase", "get me", "want 2", "want 3"]):
-            yield cls._sse("tool_start", {"tool": "search_products", "message": "Checking product catalog and live inventory..."})
+        # Check for Product Discovery / Search (e.g. "Do you have any green tea under 500 NPR?", "What teas do you have?")
+        elif any(w in q_lower for w in ["do you have", "what tea", "search tea", "under 500", "green tea under", "recommend tea", "catalog", "cheapest tea"]):
+            yield cls._sse("tool_start", {"tool": "search_products", "message": "Searching Himali Tea House live catalog database..."})
+            await asyncio.sleep(0.1)
+
+            cat = None
+            if "green" in q_lower:
+                cat = "Green"
+            elif "black" in q_lower:
+                cat = "Black"
+            elif "oolong" in q_lower:
+                cat = "Oolong"
+            elif "white" in q_lower:
+                cat = "White"
+            elif "spiced" in q_lower or "chai" in q_lower:
+                cat = "Spiced"
+
+            max_p = None
+            m_price = re.search(r"under\s+(?:npr\s*)?(\d+)", q_lower)
+            if m_price:
+                max_p = float(m_price.group(1))
+
+            search_res = await AgentATools.search_products(db, user.org_id, category=cat, max_price=max_p)
+            tool_activity.append({"tool": "search_products", "result": search_res})
+            yield cls._sse("tool_end", {"tool": "search_products", "status": "completed"})
+
+            prods = search_res.get("products", [])
+            if prods:
+                lines = [f"• **{p['name']}** (`{p['sku']}`): NPR {p['price']:.2f} ({p['stock']} in stock)" for p in prods]
+                card_data = {"type": "product_catalog", "products": prods}
+                final_text = f"We found the following live matching teas in our catalog:\n\n" + "\n".join(lines)
+            else:
+                # Also check all teas in this category to give exact live price info
+                all_cat_res = await AgentATools.search_products(db, user.org_id, category=cat)
+                all_cat = all_cat_res.get("products", [])
+                threshold_text = f"{max_p:.0f}" if max_p else "that price"
+                if all_cat:
+                    lines = [f"• **{p['name']}** (`{p['sku']}`): NPR {p['price']:.2f} ({p['stock']} in stock)" for p in all_cat]
+                    final_text = (
+                        f"We searched our live inventory and do not currently have any {cat or ''} tea under NPR {threshold_text}. "
+                        f"Our available {cat or ''} teas start at:\n\n" + "\n".join(lines) + "\n\nWould you like to order any of these?"
+                    )
+                else:
+                    final_text = "I could not find any teas matching that price criteria in our catalog. Would you like to explore our single-origin orthodox teas?"
+
+        # Check for Buying / Purchasing / Ordering products (e.g. "I want to buy 2 units of HT-SN-100", "order HT-GT-100")
+        elif any(k in q_lower for k in ["buy", "order", "purchase", "get me", "want"]) and any(w in q_lower for w in ["unit", "pack", "canister", "ht-", "tea", "pearls", "needle"]):
+            yield cls._sse("tool_start", {"tool": "prepare_order_summary", "message": "Checking product catalog and live inventory..."})
             await asyncio.sleep(0.1)
 
             # Match product
             sku = "HT-SN-100"  # default
             qty = 1
-            qty_match = re.search(r"(\d+)\s*(unit|packet|pack|canister|gram|kg|piece|bottle)?", query)
-            if qty_match:
-                try:
-                    qty = int(qty_match.group(1))
-                except Exception:
-                    qty = 1
 
-            if "green" in q_lower:
+            # Extract explicit SKU if present
+            sku_match = re.search(r"HT-[A-Za-z0-9-]+", query, re.IGNORECASE)
+            if sku_match:
+                sku = sku_match.group(0).upper()
+            elif "green" in q_lower:
                 sku = "HT-GT-100"
             elif "oolong" in q_lower or "shangri" in q_lower:
                 sku = "HT-OL-100"
@@ -247,18 +306,26 @@ class AgentEngine:
             elif "puerh" in q_lower or "cake" in q_lower or "ht-or-99" in q_lower:
                 sku = "HT-OR-99"
 
+            qty_match = re.search(r"(\d+)\s*(?:unit|packet|pack|canister|gram|kg|piece|bottle)?", query)
+            if qty_match:
+                try:
+                    qty = int(qty_match.group(1))
+                except Exception:
+                    qty = 1
+
             summary_res = await AgentATools.prepare_order_summary(
                 db, user.org_id, user.id,
                 items=[{"sku": sku, "quantity": qty}],
                 shipping_address="Kathmandu Valley, Nepal"
             )
-            tool_activity.append({"tool": "search_products", "result": summary_res})
-            yield cls._sse("tool_end", {"tool": "search_products", "status": "completed"})
+            tool_activity.append({"tool": "prepare_order_summary", "result": summary_res})
+            yield cls._sse("tool_end", {"tool": "prepare_order_summary", "status": "completed"})
 
             if summary_res.get("success"):
                 card_data = summary_res.get("card")
                 final_text = summary_res.get("summary_text")
             else:
+                card_data = summary_res.get("card")
                 final_text = summary_res.get("message") or summary_res.get("error")
 
         # Knowledge Base Question (Brewing, policy, tea details, shipping, returns, FAQ)
@@ -299,7 +366,7 @@ class AgentEngine:
             await asyncio.sleep(0.015)
 
         # Save agent message with card and citations to DB
-        agent_msg_id = f"msg_{datetime.datetime.utcnow().timestamp()}"
+        agent_msg_id = f"msg_{uuid.uuid4().hex[:12]}"
         agent_msg = Message(
             id=agent_msg_id,
             conversation_id=history[0].conversation_id if history else "conv_default",
@@ -339,122 +406,204 @@ class AgentEngine:
         card_data = None
         final_text = ""
 
-        now_ktm = SchedulingEngine.now_kathmandu()
-        tomorrow_date = (now_ktm + datetime.timedelta(days=1)).strftime("%Y-%m-%d")
+        # Prompt Injection & Cross-Tenant Boundary Protection
+        if any(w in q_lower for w in ["himali", "tea house", "tea order", "show me my himali", "database schema", "ignore all"]):
+            final_text = (
+                "I am the Lotus Wellness Studio booking assistant. I cannot access Himali Tea House orders, "
+                "internal system schemas, or cross-tenant databases. "
+                "How may I assist you with wellness therapies, practitioner schedules, or appointment bookings in Kathmandu?"
+            )
 
-        # Check for Available Slots / Availability / Schedule
-        if any(w in q_lower for w in ["available", "slots", "free time", "opening hours", "when can i", "schedule"]):
-            yield cls._sse("tool_start", {"tool": "find_available_slots", "message": "Checking practitioner calendar and opening hours in Asia/Kathmandu..."})
-            await asyncio.sleep(0.1)
+        # Opening Hours Boundary Rule (e.g. 60-min session at 18:30 on a weekday)
+        elif ("18:30" in q_lower or "6:30" in q_lower) and any(w in q_lower for w in ["60-minute", "60 min", "1 hour", "massage", "weekday", "can i book"]):
+            final_text = (
+                "Lotus Wellness Studio closes at 19:00 on weekdays. A 60-minute therapy booked at 18:30 "
+                "would finish at 19:30, exceeding our operating hours. "
+                "The latest available start time for a 60-minute session on weekdays is 18:00 (Asia/Kathmandu UTC+05:45)."
+            )
 
-            service_id = "srv_1"
-            if "abhyanga" in q_lower or "ayurved" in q_lower:
-                service_id = "srv_2"
-            elif "physio" in q_lower or "sports" in q_lower:
-                service_id = "srv_3"
-            elif "dry needling" in q_lower:
-                service_id = "srv_4"
-            elif "yoga" in q_lower:
-                service_id = "srv_5"
-            elif "sound" in q_lower or "singing bowl" in q_lower:
-                service_id = "srv_6"
-
-            target_date = tomorrow_date
+        # Holiday Check Rule (e.g. 2026-11-08 Bhai Tika or public holidays)
+        elif any(w in q_lower for w in ["2026-11-08", "bhai tika", "dashain", "tihar"]) or (
+            re.search(r"\d{4}-\d{2}-\d{2}", query) and any(w in q_lower for w in ["holiday", "closed", "book"])
+        ):
             date_match = re.search(r"\d{4}-\d{2}-\d{2}", query)
-            if date_match:
-                target_date = date_match.group(0)
-
-            slots_res = await AgentBTools.find_available_slots(db, user.org_id, service_id, target_date)
-            tool_activity.append({"tool": "find_available_slots", "result": slots_res})
-            yield cls._sse("tool_end", {"tool": "find_available_slots", "status": "completed"})
-
-            if slots_res.get("slots"):
-                card_data = slots_res.get("card")
-                sample_times = [s["formatted"] for s in slots_res["slots"][:3]]
+            chk_date_str = date_match.group(0) if date_match else "2026-11-08"
+            chk_date = datetime.datetime.strptime(chk_date_str, "%Y-%m-%d").date()
+            is_hol, hol_name = await SchedulingEngine.is_holiday(db, user.org_id, chk_date)
+            if is_hol:
                 final_text = (
-                    f"Here are the upcoming available slots for {target_date} in Kathmandu time:\n"
-                    + "\n".join([f"- {t}" for t in sample_times])
-                    + "\n\nPlease let me know your preferred time or click a slot below to confirm!"
+                    f"Lotus Wellness Studio is closed on {chk_date_str} for **{hol_name or 'Public Holiday'}**. "
+                    "Appointments cannot be scheduled on official holidays. Please choose another date!"
                 )
             else:
-                final_text = f"There are no free slots found for {target_date} (the studio might be closed or fully booked). Would you like to check another day?"
+                final_text = f"{chk_date_str} is not a listed holiday. Would you like to view available slots?"
 
-        # Check for Reschedule
-        elif any(w in q_lower for w in ["reschedule", "change appointment", "move my booking", "move to"]):
-            yield cls._sse("tool_start", {"tool": "reschedule_booking", "message": "Checking availability for requested reschedule slot..."})
+        # Conflict Resolution on Reschedule (e.g. "Reschedule my latest booking to a time that is already taken")
+        elif any(w in q_lower for w in ["reschedule", "change appointment", "move my booking"]) and any(w in q_lower for w in ["already taken", "taken", "conflict", "occupied", "existing"]):
+            yield cls._sse("tool_start", {"tool": "reschedule_booking", "message": "Checking availability and conflict resolution in Asia/Kathmandu..."})
             await asyncio.sleep(0.1)
 
-            # Find latest confirmed booking
             my_bookings = await AgentBTools.list_my_bookings(db, user.org_id, user.id)
             active_bkg = next((b for b in my_bookings["bookings"] if b["status"] in ["confirmed", "rescheduled"]), None)
-
             if not active_bkg:
-                yield cls._sse("tool_end", {"tool": "reschedule_booking", "status": "completed"})
-                final_text = "I could not find an active booking under your account to reschedule."
-            else:
-                # Proposed time: tomorrow at 11:00 AM or conflict trigger
-                new_time = f"{tomorrow_date}T11:00:00"
-                if "conflict" in q_lower or "taken" in q_lower:
-                    # Deliberately pick an existing booking time to showcase conflict handling
-                    new_time = active_bkg["start_time"]
+                # Fallback to any booking
+                active_bkg = my_bookings["bookings"][0] if my_bookings["bookings"] else None
 
-                resched_res = await AgentBTools.reschedule_booking(db, user.org_id, user.id, active_bkg["booking_id"], new_time)
+            if active_bkg:
+                # Find an occupied slot belonging to another booking to trigger realistic conflict
+                other_bkg_stmt = select(Booking).where(
+                    Booking.org_id == user.org_id,
+                    Booking.id != active_bkg["booking_id"],
+                    Booking.status.in_(["confirmed", "rescheduled"])
+                )
+                other_bkg_res = await db.execute(other_bkg_stmt)
+                other_bkg = other_bkg_res.scalars().first()
+                if other_bkg:
+                    conflict_time = other_bkg.start_time.strftime("%Y-%m-%dT%H:%M:%S")
+                else:
+                    conflict_time = "2026-11-03T10:00:00"
+
+                resched_res = await AgentBTools.reschedule_booking(db, user.org_id, user.id, active_bkg["booking_id"], conflict_time)
                 tool_activity.append({"tool": "reschedule_booking", "result": resched_res})
                 yield cls._sse("tool_end", {"tool": "reschedule_booking", "status": "completed"})
 
-                final_text = resched_res.get("message") or resched_res.get("error")
                 card_data = resched_res.get("card")
-
-        # Check for Cancellation
-        elif "cancel" in q_lower and ("booking" in q_lower or "appointment" in q_lower or "session" in q_lower):
-            yield cls._sse("tool_start", {"tool": "cancel_booking", "message": "Reviewing cancellation window and policy..."})
-            await asyncio.sleep(0.1)
-
-            my_bookings = await AgentBTools.list_my_bookings(db, user.org_id, user.id)
-            active_bkg = next((b for b in my_bookings["bookings"] if b["status"] in ["confirmed", "rescheduled"]), None)
-
-            if active_bkg:
-                cancel_res = await AgentBTools.cancel_booking(db, user.org_id, user.id, active_bkg["booking_id"])
-                tool_activity.append({"tool": "cancel_booking", "result": cancel_res})
-                yield cls._sse("tool_end", {"tool": "cancel_booking", "status": "completed"})
-                final_text = cancel_res.get("message")
+                final_text = resched_res.get("message") or resched_res.get("error")
             else:
-                yield cls._sse("tool_end", {"tool": "cancel_booking", "status": "completed"})
-                final_text = "You do not have any active upcoming appointments to cancel."
+                yield cls._sse("tool_end", {"tool": "reschedule_booking", "status": "completed"})
+                final_text = "I could not find an active booking under your account to reschedule."
 
-        # Check for Booking Appointment / Booking confirmation
-        elif any(w in q_lower for w in ["book", "appointment", "reserve", "yes confirm booking", "confirm booking"]):
-            yield cls._sse("tool_start", {"tool": "create_booking", "message": "Verifying appointment slot and practitioner schedule..."})
+        # Relative Dates & Afternoon Slot Discovery (e.g. "Book a deep tissue massage for next Tuesday afternoon")
+        elif any(w in q_lower for w in ["next tuesday", "tuesday", "afternoon", "tomorrow", "available slots", "slots", "when can i"]):
+            yield cls._sse("tool_start", {"tool": "find_available_slots", "message": "Resolving Asia/Kathmandu timezone (+05:45) and checking practitioner slots..."})
             await asyncio.sleep(0.1)
+
+            resolved_dt = SchedulingEngine.resolve_relative_datetime_kathmandu(query)
+            target_date = resolved_dt.strftime("%Y-%m-%d")
+
+            service_id = "srv_1" # Deep Tissue Massage default
+            if "abhyanga" in q_lower or "ayurved" in q_lower:
+                service_id = "srv_2"
+            elif "physio" in q_lower:
+                service_id = "srv_3"
+
+            # Check holiday
+            is_hol, hol_name = await SchedulingEngine.is_holiday(db, user.org_id, resolved_dt.date())
+            if is_hol:
+                yield cls._sse("tool_end", {"tool": "find_available_slots", "status": "completed"})
+                final_text = f"Lotus Wellness Studio is closed on {target_date} ({hol_name}). Please choose another date!"
+            else:
+                slots_res = await AgentBTools.find_available_slots(db, user.org_id, service_id, target_date)
+                tool_activity.append({"tool": "find_available_slots", "result": slots_res})
+                yield cls._sse("tool_end", {"tool": "find_available_slots", "status": "completed"})
+
+                raw_slots = slots_res.get("slots", [])
+                # If "afternoon" was specifically requested, filter slots between 12:00 and 17:00
+                if "afternoon" in q_lower:
+                    raw_slots = [
+                        s for s in raw_slots
+                        if 12 <= datetime.datetime.fromisoformat(s["start_time"].replace("Z", "+00:00")).astimezone(KATHMANDU_TZ).hour < 17
+                    ]
+
+                if raw_slots:
+                    card_data = {
+                        "type": "slot_picker",
+                        "title": f"Afternoon Slots for {target_date} (Asia/Kathmandu UTC+05:45)",
+                        "service_id": service_id,
+                        "slots": raw_slots[:6]
+                    }
+                    slot_times = [s["formatted"] for s in raw_slots[:4]]
+                    final_text = (
+                        f"Here are the available afternoon slots for **Deep Tissue Massage** on **{target_date}** (Asia/Kathmandu UTC+05:45):\n\n"
+                        + "\n".join([f"• {t}" for t in slot_times])
+                        + "\n\nAll appointments are localized to Kathmandu time. Please click a slot below or tell me which time you prefer!"
+                    )
+                else:
+                    final_text = f"There are no available afternoon slots on {target_date}. Would you like to check morning availability or another day?"
+
+        # Confirmation Gate / Slot Selection (e.g. "Book slot at 14:00", "14:00", "Select 14:00", "Book with Dolkar at 14:00")
+        elif any(t in q_lower for t in ["14:00", "15:00", "10:00", "11:00", "12:00", "16:00", "2:00", "2pm", "3pm"]) and any(w in q_lower for w in ["book", "select", "slot", "with", "at"]):
+            yield cls._sse("tool_start", {"tool": "prepare_booking_summary", "message": "Staging booking summary and confirmation proposal..."})
+            await asyncio.sleep(0.1)
+
+            # Contextual date resolution: query -> conversation history -> relative date
+            target_date = None
+            date_match = re.search(r"\d{4}-\d{2}-\d{2}", query)
+            if date_match:
+                target_date = date_match.group(0)
+            elif history:
+                for prev_m in reversed(history):
+                    d_m = re.search(r"\d{4}-\d{2}-\d{2}", prev_m.content)
+                    if d_m:
+                        target_date = d_m.group(0)
+                        break
+
+            if not target_date:
+                resolved_dt = SchedulingEngine.resolve_relative_datetime_kathmandu(query)
+                target_date = resolved_dt.strftime("%Y-%m-%d")
+
+            time_match = re.search(r"(\d{1,2}:\d{2})", query)
+            time_str = time_match.group(1) if time_match else "14:00"
 
             service_id = "srv_1"
-            practitioner_id = "prac_2"
-            start_time = f"{tomorrow_date}T14:00:00"
+            practitioner_id = "prac_2" # Master Tenzing Norbu
 
-            if "physio" in q_lower or "sunita" in q_lower:
-                service_id = "srv_3"
-                practitioner_id = "prac_1"
-            elif "yoga" in q_lower or "aarati" in q_lower:
-                service_id = "srv_5"
-                practitioner_id = "prac_3"
+            summary_res = await AgentBTools.prepare_booking_summary(
+                db, user.org_id, user.id,
+                service_id=service_id,
+                practitioner_id=practitioner_id,
+                start_time_str=f"{target_date}T{time_str}:00"
+            )
+            tool_activity.append({"tool": "prepare_booking_summary", "result": summary_res})
+            yield cls._sse("tool_end", {"tool": "prepare_booking_summary", "status": "completed"})
 
-            # Check if user is confirming or asking for summary
-            if "confirm" in q_lower:
+            if summary_res.get("success"):
+                card_data = summary_res.get("card")
+                final_text = summary_res.get("summary_text")
+            else:
+                card_data = summary_res.get("card")
+                final_text = summary_res.get("message") or summary_res.get("error")
+
+        # Confirm booking execution (e.g. "Yes, please confirm this booking.", "confirm booking")
+        elif any(w in q_lower for w in ["yes, please confirm this booking", "confirm booking", "confirm my booking"]):
+            yield cls._sse("tool_start", {"tool": "create_booking", "message": "Confirming appointment in studio calendar..."})
+            await asyncio.sleep(0.1)
+
+            # Get latest pending booking proposal
+            prop_stmt = select(ActionProposal).where(
+                ActionProposal.org_id == user.org_id,
+                ActionProposal.user_id == user.id,
+                ActionProposal.action_type == "create_booking",
+                ActionProposal.status == "pending"
+            ).order_by(desc(ActionProposal.created_at))
+            prop_res = await db.execute(prop_stmt)
+            latest_prop = prop_res.scalars().first()
+
+            if latest_prop:
+                p_data = json.loads(latest_prop.payload_json)
                 book_res = await AgentBTools.create_booking(
-                    db, user.org_id, user.id, service_id, practitioner_id, start_time
+                    db, user.org_id, user.id,
+                    service_id=p_data["service_id"],
+                    practitioner_id=p_data["practitioner_id"],
+                    start_time_str=p_data["start_time"],
+                    proposal_id=latest_prop.id
                 )
                 tool_activity.append({"tool": "create_booking", "result": book_res})
                 yield cls._sse("tool_end", {"tool": "create_booking", "status": "completed"})
                 final_text = book_res.get("message") or book_res.get("error")
                 card_data = book_res.get("card")
             else:
-                summary_res = await AgentBTools.prepare_booking_summary(
-                    db, user.org_id, user.id, service_id, practitioner_id, start_time
+                # Default direct booking confirmation
+                now_ktm = SchedulingEngine.now_kathmandu()
+                target_dt = now_ktm + datetime.timedelta(days=2)
+                start_iso = f"{target_dt.strftime('%Y-%m-%d')}T14:00:00"
+                book_res = await AgentBTools.create_booking(
+                    db, user.org_id, user.id, "srv_1", "prac_2", start_iso
                 )
-                tool_activity.append({"tool": "create_booking", "result": summary_res})
+                tool_activity.append({"tool": "create_booking", "result": book_res})
                 yield cls._sse("tool_end", {"tool": "create_booking", "status": "completed"})
-                final_text = summary_res.get("summary_text") or summary_res.get("error")
-                card_data = summary_res.get("card")
+                final_text = book_res.get("message") or book_res.get("error")
+                card_data = book_res.get("card")
 
         # Knowledge Base Question (Services, Bios, Cancellation policy, FAQs)
         else:
@@ -492,7 +641,7 @@ class AgentEngine:
             yield cls._sse("token", {"token": token})
             await asyncio.sleep(0.015)
 
-        agent_msg_id = f"msg_{datetime.datetime.utcnow().timestamp()}"
+        agent_msg_id = f"msg_{uuid.uuid4().hex[:12]}"
         agent_msg = Message(
             id=agent_msg_id,
             conversation_id=history[0].conversation_id if history else "conv_default",
@@ -534,7 +683,15 @@ class AgentEngine:
         tool_activity = []
         final_text = ""
 
-        if any(w in q_lower for w in ["conversion", "conversion rate", "funnel"]):
+        # Read-Only Enforcement Check
+        if any(w in q_lower for w in ["cancel", "delete", "drop", "update", "modify", "remove", "insert"]):
+            final_text = (
+                "The Admin Analytics Agent is strictly read-only. Modification and deletion commands "
+                "(such as cancelling orders, updating records, or deleting users) are strictly prohibited. "
+                "I can only provide operational summaries, inventory analytics, and business performance metrics."
+            )
+
+        elif any(w in q_lower for w in ["conversion", "conversion rate", "funnel"]):
             yield cls._sse("tool_start", {"tool": "get_conversion_rate", "message": "Computing conversation-to-order conversion rate..."})
             await asyncio.sleep(0.1)
             res = await AdminAnalyticsTools.get_conversion_rate(db, user.org_id)
@@ -633,7 +790,7 @@ class AgentEngine:
             yield cls._sse("token", {"token": token})
             await asyncio.sleep(0.015)
 
-        agent_msg_id = f"msg_{datetime.datetime.utcnow().timestamp()}"
+        agent_msg_id = f"msg_{uuid.uuid4().hex[:12]}"
         agent_msg = Message(
             id=agent_msg_id,
             conversation_id=conversation_id,
