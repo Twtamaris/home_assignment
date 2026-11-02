@@ -34,3 +34,4 @@
 - **Duration:** 75 minutes
 - **Price:** NPR 4,000
 - **Overview:** Exfoliating organic walnut shell and juniper berry body scrub followed by a detoxifying private herbal steam chamber infused with mountain eucalyptus and pine.
+

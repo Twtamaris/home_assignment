@@ -47,3 +47,4 @@ Yes, our Deluxe Lotus Suite accommodates two clients simultaneously for dual mas
 
 ### Q16: What holidays is the studio closed on?
 Lotus Wellness Studio observes major national festivals including Dashain (Maha Ashtami to Vijaya Dashami), Tihar (Laxmi Puja and Bhai Tika), and Nepali New Year (Baisakh 1). Specific dates are announced in advance and blocked from the booking calendar.
+

@@ -16,3 +16,4 @@
 
 ## Health Contraindications and Notice
 - Please inform our practitioners before treatment if you are pregnant, have acute spinal fractures, deep vein thrombosis, open skin wounds, or contagious fevers. Certain high-intensity deep tissue techniques are contraindicated during early pregnancy.
+

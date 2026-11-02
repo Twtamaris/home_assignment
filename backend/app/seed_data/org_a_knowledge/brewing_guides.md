@@ -30,3 +30,4 @@
 - **Water & Milk Ratio:** 150ml filtered water + 100ml whole milk (or oat milk)
 - **Leaf Quantity:** 5g spiced CTC black tea blend
 - **Method:** Simmer water with spices for 3 minutes until aromatic, add tea leaves and simmer for 2 minutes, pour milk and bring to a rolling boil, strain and sweeten with raw cane sugar.
+

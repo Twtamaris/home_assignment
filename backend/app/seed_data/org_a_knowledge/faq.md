@@ -50,3 +50,4 @@ To uphold food hygiene standards, opened tea pouches or loose tea leaves cannot 
 
 ### Q16: How do you handle out-of-stock items in cart requests?
 If an item is out of stock or requested in a quantity greater than current available inventory, our agent will notify you of the maximum available units and recommend the closest alternative tea profile from the same altitude tier.
+

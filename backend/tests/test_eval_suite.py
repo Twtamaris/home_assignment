@@ -1,6 +1,7 @@
 import os
 import sys
 import json
+import asyncio
 import pytest
 import datetime
 import pytz
@@ -10,7 +11,10 @@ from sqlalchemy import select
 
 from app.core.config import settings
 from app.core.database import Base, AsyncSessionLocal
-from app.models.models import User, Product, Service, Practitioner, Order, Booking, KnowledgeChunk, CustomerMemory
+from app.models.models import (
+    User, Product, Service, Practitioner, Order, Booking,
+    KnowledgeChunk, CustomerMemory, ActionProposal
+)
 from app.services.agent_a import AgentATools
 from app.services.agent_b import AgentBTools
 from app.services.admin_agent import AdminAnalyticsTools
@@ -292,8 +296,8 @@ async def test_eval_b6_business_rule_5_prepare_booking_confirmation(db_session):
 @pytest.mark.asyncio
 async def test_eval_b7_happy_path_create_booking_and_db_state(db_session):
     """B7: Happy path booking creation: Checks DB state & practitioner link."""
-    # Pick a date 6 days in advance to guarantee an unbooked slot
-    future_slot = (SchedulingEngine.now_kathmandu() + datetime.timedelta(days=6)).strftime("%Y-%m-%dT15:00:00")
+    # Pick a date 4 days in advance to guarantee an unbooked slot (avoiding holidays)
+    future_slot = (SchedulingEngine.now_kathmandu() + datetime.timedelta(days=4)).strftime("%Y-%m-%dT15:00:00")
     res = await AgentBTools.create_booking(
         db_session, "org_b", "user_b3", "srv_1", "prac_2", future_slot, notes="Lower back relief"
     )
@@ -441,3 +445,131 @@ async def test_eval_adm3_admin_conversion_rate(db_session):
     assert res["success"] is True
     assert "conversion_rate_percentage" in res["metrics"]
     assert "Formula" in res["definition"]
+
+# =============================================================================
+# EVAL SUITE: ADVANCED CONCURRENCY & CONFIRMATION GATES (New Verified Tests)
+# =============================================================================
+
+@pytest.mark.asyncio
+async def test_eval_b15_concurrent_simultaneous_booking_race_condition():
+    """B15: Concurrency Safety: Two customers simultaneously grabbing the same slot. Exactly one succeeds, one gets conflict error."""
+    slot_time = (SchedulingEngine.now_kathmandu() + datetime.timedelta(days=12)).strftime("%Y-%m-%dT15:00:00")
+
+    async def book_attempt(customer_id):
+        async with AsyncSessionLocal() as session:
+            return await AgentBTools.create_booking(
+                session, "org_b", customer_id, "srv_1", "prac_3", slot_time
+            )
+
+    results = await asyncio.gather(
+        book_attempt("user_b1"),
+        book_attempt("user_b2"),
+        return_exceptions=True
+    )
+
+    successful = [r for r in results if isinstance(r, dict) and r.get("success") is True]
+    failed = [r for r in results if isinstance(r, dict) and r.get("success") is False]
+
+    assert len(successful) == 1, f"Expected exactly 1 booking to succeed, but got {len(successful)}"
+    assert len(failed) == 1, f"Expected exactly 1 booking to fail, but got {len(failed)}"
+    assert "booked by another customer" in failed[0]["error"]
+
+@pytest.mark.asyncio
+async def test_eval_a15_concurrent_simultaneous_stock_exhaustion():
+    """A15: Concurrency Safety: Two customers simultaneously buying the last unit of stock. Exactly one succeeds, stock reaches 0 and never goes negative."""
+    # Temporarily set product stock to 1
+    async with AsyncSessionLocal() as session:
+        p = (await session.execute(select(Product).where(Product.sku == "HT-RO-100", Product.org_id == "org_a"))).scalars().first()
+        initial_stock = p.stock
+        p.stock = 1
+        await session.commit()
+
+    async def purchase_attempt(customer_id):
+        async with AsyncSessionLocal() as session:
+            return await AgentATools.create_order(
+                session, "org_a", customer_id, [{"sku": "HT-RO-100", "quantity": 1}], confirmed=True
+            )
+
+    results = await asyncio.gather(
+        purchase_attempt("user_a1"),
+        purchase_attempt("user_a2"),
+        return_exceptions=True
+    )
+
+    successful = [r for r in results if isinstance(r, dict) and r.get("success") is True]
+    failed = [r for r in results if isinstance(r, dict) and r.get("success") is False]
+
+    assert len(successful) == 1, f"Expected 1 order to succeed, got {len(successful)}"
+    assert len(failed) == 1, f"Expected 1 order to fail, got {len(failed)}"
+
+    # Verify DB stock is exactly 0, never negative!
+    async with AsyncSessionLocal() as session:
+        p_final = (await session.execute(select(Product).where(Product.sku == "HT-RO-100", Product.org_id == "org_a"))).scalars().first()
+        assert p_final.stock == 0
+        # Restore stock for subsequent tests
+        p_final.stock = initial_stock
+        await session.commit()
+
+@pytest.mark.asyncio
+async def test_eval_a16_action_proposal_backend_confirmation_gate(db_session):
+    """A16: Server-side Confirmation Gate: Proposal stages pending action, order created ONLY upon confirmation."""
+    # 1. Prepare summary -> returns proposal_id
+    summary = await AgentATools.prepare_order_summary(
+        db_session, "org_a", "user_a1", [{"sku": "HT-SN-100", "quantity": 1}]
+    )
+    assert summary["success"] is True
+    assert summary["requires_confirmation"] is True
+    proposal_id = summary["proposal_id"]
+    assert proposal_id.startswith("prop_ord_")
+
+    # 2. Check ActionProposal in DB is pending
+    prop = (await db_session.execute(select(ActionProposal).where(ActionProposal.id == proposal_id))).scalars().first()
+    assert prop is not None
+    assert prop.status == "pending"
+
+    # 3. Simulate client executing confirmation
+    order_res = await AgentATools.create_order(
+        db_session, "org_a", "user_a1", [{"sku": "HT-SN-100", "quantity": 1}], proposal_id=proposal_id
+    )
+    assert order_res["success"] is True
+    order_id = order_res["order_id"]
+
+    # 4. Verify proposal status updated to confirmed
+    await db_session.refresh(prop)
+    assert prop.status == "confirmed"
+
+    # 5. Clean up created test order
+    await AgentATools.cancel_order(db_session, "org_a", "user_a1", order_id)
+
+@pytest.mark.asyncio
+async def test_eval_sec1_privilege_escalation_role_tampering_blocked(db_session):
+    """SEC1: Security: Client sending role='admin' in registration is strictly forced to role='customer'."""
+    from app.api.auth import register
+    from app.models.schemas import UserRegister
+    import uuid
+
+    fake_email = f"attacker_{uuid.uuid4().hex[:6]}@example.com"
+    payload = UserRegister(
+        email=fake_email,
+        password="Password123!",
+        name="Malicious Actor",
+        org_id="org_a",
+        role="admin"  # Malicious attempt to self-grant admin!
+    )
+    res = await register(payload, db=db_session)
+    assert res.user.role == "customer"
+
+    # Verify directly in database
+    db_user = (await db_session.execute(select(User).where(User.email == fake_email))).scalars().first()
+    assert db_user.role == "customer"
+    assert db_user.role != "admin"
+
+@pytest.mark.asyncio
+async def test_eval_b16_relative_date_nlp_resolution_kathmandu():
+    """B16: Rule 6: 'next Tuesday afternoon' resolves to next Tuesday at 14:00 with Asia/Kathmandu timezone."""
+    ref_dt = KATHMANDU_TZ.localize(datetime.datetime(2026, 11, 2, 9, 0, 0)) # Monday
+    resolved = SchedulingEngine.resolve_relative_datetime_kathmandu("next Tuesday afternoon", ref_dt=ref_dt)
+    assert resolved.weekday() == 1  # Tuesday
+    assert resolved.hour == 14  # Afternoon (2 PM)
+    assert resolved.utcoffset() == datetime.timedelta(hours=5, minutes=45)
+

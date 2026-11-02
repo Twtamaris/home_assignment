@@ -2,7 +2,10 @@ import datetime
 from typing import Dict, Any, List
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, func, distinct
-from app.models.models import Order, Booking, User, Conversation, Product, Service, Practitioner, Message
+from app.models.models import (
+    Order, OrderItem, Booking, User, Conversation, Product, Service,
+    Practitioner, Message, InventoryEvent
+)
 
 class AdminAnalyticsTools:
     """
@@ -144,6 +147,7 @@ class AdminAnalyticsTools:
         """
         Conversion rate:
         Conversations that led to an order (Org A) or booking (Org B) ÷ all conversations in the period.
+        Directly links orders/bookings to conversations via foreign key with heuristic fallback.
         """
         since_dt = datetime.datetime.utcnow() - datetime.timedelta(days=time_window_days)
         time_window_label = f"Last {time_window_days} days"
@@ -158,9 +162,31 @@ class AdminAnalyticsTools:
         conversations = conv_res.scalars().all()
         total_conv = len(conversations)
 
-        # Count conversations that contain order_placed/booking_confirmed cards or tool calls
+        # Relational check: conversations with an order or booking foreign key
+        if org_id == "org_a":
+            ord_conv_stmt = select(distinct(Order.conversation_id)).where(
+                Order.org_id == org_id,
+                Order.conversation_id.isnot(None),
+                Order.created_at >= since_dt
+            )
+            ord_conv_res = await db.execute(ord_conv_stmt)
+            converted_conv_ids = set(r for r in ord_conv_res.scalars().all() if r)
+        else:
+            bkg_conv_stmt = select(distinct(Booking.conversation_id)).where(
+                Booking.org_id == org_id,
+                Booking.conversation_id.isnot(None),
+                Booking.created_at >= since_dt
+            )
+            bkg_conv_res = await db.execute(bkg_conv_stmt)
+            converted_conv_ids = set(r for r in bkg_conv_res.scalars().all() if r)
+
+        # Count conversations that converted either via FK or via card/tool trace
         converted_conv_count = 0
         for conv in conversations:
+            if conv.id in converted_conv_ids:
+                converted_conv_count += 1
+                continue
+
             m_stmt = select(Message).where(
                 Message.conversation_id == conv.id,
                 Message.sender == "agent"
@@ -196,21 +222,25 @@ class AdminAnalyticsTools:
     async def get_top_items(db: AsyncSession, org_id: str) -> Dict[str, Any]:
         """
         Top items:
-        Org A: Best-selling products; items most often out of stock.
+        Org A: Best-selling products (from OrderItem); items most often out of stock (from InventoryEvent).
         Org B: Most-booked services; busiest time slots.
         """
         if org_id == "org_a":
-            # Best selling products from orders
-            orders_stmt = select(Order).where(Order.org_id == org_id)
-            orders_res = await db.execute(orders_stmt)
-            orders = orders_res.scalars().all()
+            # Best selling products using OrderItem table
+            item_stmt = (
+                select(
+                    OrderItem.sku,
+                    OrderItem.name,
+                    func.sum(OrderItem.quantity).label("units_sold")
+                )
+                .where(OrderItem.org_id == org_id)
+                .group_by(OrderItem.sku, OrderItem.name)
+                .order_by(func.sum(OrderItem.quantity).desc())
+            )
+            item_res = await db.execute(item_stmt)
+            item_rows = item_res.all()
 
-            sales_count = {}
-            for o in orders:
-                for item in o.items:
-                    sku = item.get("sku")
-                    qty = item.get("quantity", 0)
-                    sales_count[sku] = sales_count.get(sku, 0) + qty
+            sales_map = {r[0]: (r[1], int(r[2])) for r in item_rows}
 
             p_stmt = select(Product).where(Product.org_id == org_id)
             p_res = await db.execute(p_stmt)
@@ -218,23 +248,37 @@ class AdminAnalyticsTools:
 
             ranked_products = []
             for p in products:
+                units_sold = sales_map.get(p.sku, (p.name, 0))[1]
                 ranked_products.append({
                     "sku": p.sku,
                     "name": p.name,
                     "category": p.category,
-                    "units_sold": sales_count.get(p.sku, 0),
+                    "units_sold": units_sold,
                     "current_stock": p.stock
                 })
 
             # Sort best-selling
             best_sellers = sorted(ranked_products, key=lambda x: x["units_sold"], reverse=True)[:5]
-            # Items out of stock or low stock (<= 5)
+
+            # Out of stock and low stock items (<= 5)
             low_stock = [p for p in ranked_products if p["current_stock"] <= 5]
+
+            # Historical stockouts from InventoryEvent
+            inv_stmt = (
+                select(InventoryEvent.sku, func.count().label("out_of_stock_events"))
+                .where(InventoryEvent.org_id == org_id, InventoryEvent.stock_after == 0)
+                .group_by(InventoryEvent.sku)
+            )
+            inv_res = await db.execute(inv_stmt)
+            stockout_counts = {r[0]: int(r[1]) for r in inv_res.all()}
+
+            for p in low_stock:
+                p["historical_stockouts"] = stockout_counts.get(p["sku"], 0)
 
             return {
                 "success": True,
                 "org_id": org_id,
-                "definition": "Top 5 best-selling teas/teaware by cumulative unit sales, and inventory items currently with <= 5 units remaining.",
+                "definition": "Top 5 best-selling teas/teaware by cumulative unit sales (from OrderItem lines), and inventory items currently with <= 5 units or historical stockouts.",
                 "best_selling_products": best_sellers,
                 "low_or_out_of_stock_items": low_stock
             }
@@ -275,3 +319,4 @@ class AdminAnalyticsTools:
                 "most_booked_services": ranked_services,
                 "busiest_time_slots": busiest_hours[:5]
             }
+

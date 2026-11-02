@@ -1,4 +1,5 @@
 import datetime
+import asyncio
 from typing import List, Dict, Any, Optional, Tuple
 import pytz
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -12,10 +13,63 @@ class SchedulingEngine:
     Studio Availability & Scheduling Engine for Lotus Wellness Studio (Asia/Kathmandu).
     Guarantees conflict-free scheduling, opening hours validation, and race-condition safety.
     """
+    booking_lock = asyncio.Lock()
 
     @staticmethod
     def now_kathmandu() -> datetime.datetime:
         return datetime.datetime.now(KATHMANDU_TZ)
+
+    @classmethod
+    def resolve_relative_datetime_kathmandu(
+        cls, expr: str, ref_dt: Optional[datetime.datetime] = None
+    ) -> datetime.datetime:
+        """
+        Rule 6: Resolves natural language relative dates e.g. 'next Tuesday afternoon', 'tomorrow morning'
+        anchored to Asia/Kathmandu (UTC+05:45).
+        """
+        now = ref_dt or cls.now_kathmandu()
+        text = expr.lower().strip()
+
+        target_date = now.date()
+        if "tomorrow" in text:
+            target_date = now.date() + datetime.timedelta(days=1)
+        elif "today" in text:
+            target_date = now.date()
+        else:
+            weekdays = ["monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday"]
+            for i, day in enumerate(weekdays):
+                if day in text:
+                    current_wd = now.weekday()
+                    days_ahead = (i - current_wd) % 7
+                    if days_ahead == 0:
+                        days_ahead = 7
+                    target_date = now.date() + datetime.timedelta(days=days_ahead)
+                    break
+
+        # Time resolution
+        hour, minute = 10, 0
+        if "afternoon" in text:
+            hour, minute = 14, 0
+        elif "morning" in text:
+            hour, minute = 10, 0
+        elif "evening" in text:
+            hour, minute = 17, 0
+
+        # Check for explicit hour e.g. "2pm", "14:00"
+        import re
+        time_match = re.search(r"(\d{1,2})(?::(\d{2}))?\s*(am|pm)?", text)
+        if time_match and ("am" in text or "pm" in text or ":" in text):
+            h = int(time_match.group(1))
+            m = int(time_match.group(2) or 0)
+            ampm = time_match.group(3)
+            if ampm == "pm" and h < 12:
+                h += 12
+            elif ampm == "am" and h == 12:
+                h = 0
+            hour, minute = h, m
+
+        resolved_dt = datetime.datetime.combine(target_date, datetime.time(hour, minute))
+        return KATHMANDU_TZ.localize(resolved_dt)
 
     @staticmethod
     def parse_datetime_kathmandu(dt_str: str) -> datetime.datetime:
@@ -268,3 +322,4 @@ class SchedulingEngine:
                 if len(alternatives) >= count:
                     return alternatives
         return alternatives
+

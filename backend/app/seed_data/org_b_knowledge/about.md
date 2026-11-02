@@ -14,3 +14,4 @@ Lotus Wellness Studio operates in the **Asia/Kathmandu timezone (UTC+05:45)**. A
 
 ## Location and Parking
 We are located at Ward 2, Sanepa Heights Road, Lalitpur. Dedicated on-site covered car parking and bike parking spaces are reserved exclusively for studio guests.
+

@@ -1,10 +1,14 @@
 import uuid
+import json
 import datetime
 from typing import List, Dict, Any, Optional
 import pytz
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, desc
-from app.models.models import Service, Practitioner, Booking, Holiday, WeeklyOpeningHours, CustomerMemory
+from app.models.models import (
+    Service, Practitioner, Booking, Holiday, WeeklyOpeningHours,
+    CustomerMemory, ActionProposal
+)
 from app.services.knowledge_base import KnowledgeBaseService
 from app.services.scheduling import SchedulingEngine, KATHMANDU_TZ
 
@@ -151,10 +155,35 @@ class AgentBTools:
 
         end_dt = start_dt + datetime.timedelta(minutes=service.duration_minutes)
 
+        # Stage ActionProposal for backend-enforced confirmation
+        proposal_id = f"prop_bkg_{uuid.uuid4().hex[:8]}"
+        proposal_payload = {
+            "service_id": service.id,
+            "service_name": service.name,
+            "practitioner_id": practitioner.id,
+            "practitioner_name": practitioner.name,
+            "start_time": start_dt.isoformat(),
+            "end_time": end_dt.isoformat(),
+            "price": service.price
+        }
+        proposal = ActionProposal(
+            id=proposal_id,
+            org_id=org_id,
+            user_id=user_id,
+            action_type="create_booking",
+            payload_json=json.dumps(proposal_payload),
+            summary_text=f"Booking Summary: {service.name} with {practitioner.name} on {start_dt.strftime('%A, %b %d at %I:%M %p')}",
+            status="pending",
+            expires_at=datetime.datetime.utcnow() + datetime.timedelta(minutes=30)
+        )
+        db.add(proposal)
+        await db.commit()
+
         return {
             "success": True,
             "is_summary": True,
             "requires_confirmation": True,
+            "proposal_id": proposal_id,
             "service_id": service.id,
             "service_name": service.name,
             "practitioner_id": practitioner.id,
@@ -166,6 +195,7 @@ class AgentBTools:
             "price": service.price,
             "card": {
                 "type": "booking_summary",
+                "proposal_id": proposal_id,
                 "title": "Please Confirm Your Appointment",
                 "service_name": service.name,
                 "practitioner_name": practitioner.name,
@@ -177,7 +207,7 @@ class AgentBTools:
             "summary_text": (
                 f"Booking Summary: {service.name} ({service.duration_minutes} min) with {practitioner.name} "
                 f"on {start_dt.strftime('%A, %b %d, %Y at %I:%M %p')} for NPR {service.price:.2f}. "
-                f"Would you like me to confirm this booking?"
+                f"Proposal #{proposal_id} staged. Would you like me to confirm this booking?"
             )
         }
 
@@ -189,11 +219,13 @@ class AgentBTools:
         service_id: str,
         practitioner_id: str,
         start_time_str: str,
-        notes: Optional[str] = None
+        notes: Optional[str] = None,
+        proposal_id: Optional[str] = None,
+        conversation_id: Optional[str] = None
     ) -> Dict[str, Any]:
         """
         Creates confirmed booking in DB.
-        Safe against race conditions with atomic transactional validation.
+        Safe against race conditions with atomic transactional validation and slot mutex lock.
         """
         summary = await AgentBTools.prepare_booking_summary(
             db, org_id, user_id, service_id, practitioner_id, start_time_str
@@ -205,67 +237,72 @@ class AgentBTools:
         end_dt = datetime.datetime.fromisoformat(summary["end_time"])
         booking_id = f"BKG-{uuid.uuid4().hex[:8].upper()}"
 
-        # Re-check concurrency inside atomic transaction:
         naive_start = start_dt.replace(tzinfo=None)
         naive_end = end_dt.replace(tzinfo=None)
 
-        conflict_stmt = select(Booking).where(
-            Booking.org_id == org_id,
-            Booking.practitioner_id == practitioner_id,
-            Booking.status.in_(["confirmed", "rescheduled"]),
-            Booking.start_time < naive_end,
-            Booking.end_time > naive_start
-        ).with_for_update() if "sqlite" not in str(db.bind.url) else select(Booking).where(
-            Booking.org_id == org_id,
-            Booking.practitioner_id == practitioner_id,
-            Booking.status.in_(["confirmed", "rescheduled"]),
-            Booking.start_time < naive_end,
-            Booking.end_time > naive_start
-        )
-        c_res = await db.execute(conflict_stmt)
-        if c_res.scalars().first():
-            return {
-                "success": False,
-                "error": "This slot was just booked by another customer. Please choose another slot.",
-                "suggested_alternatives": await SchedulingEngine.find_nearest_alternatives(
-                    db, org_id, service_id, start_dt, practitioner_id, count=3
-                )
-            }
+        # Critical concurrency section: serialized via booking_lock + DB conflict check
+        async with SchedulingEngine.booking_lock:
+            conflict_stmt = select(Booking).where(
+                Booking.org_id == org_id,
+                Booking.practitioner_id == practitioner_id,
+                Booking.status.in_(["confirmed", "rescheduled"]),
+                Booking.start_time < naive_end,
+                Booking.end_time > naive_start
+            )
+            c_res = await db.execute(conflict_stmt)
+            if c_res.scalars().first():
+                return {
+                    "success": False,
+                    "error": "This slot was just booked by another customer. Please choose another slot.",
+                    "suggested_alternatives": await SchedulingEngine.find_nearest_alternatives(
+                        db, org_id, service_id, start_dt, practitioner_id, count=3
+                    )
+                }
 
-        booking = Booking(
-            id=booking_id,
-            org_id=org_id,
-            user_id=user_id,
-            service_id=service_id,
-            practitioner_id=practitioner_id,
-            start_time=naive_start,
-            end_time=naive_end,
-            status="confirmed",
-            notes=notes
-        )
-        db.add(booking)
-
-        # Update customer memory (preferred practitioner)
-        mem_stmt = select(CustomerMemory).where(
-            CustomerMemory.org_id == org_id,
-            CustomerMemory.user_id == user_id,
-            CustomerMemory.memory_key == "preferred_practitioner"
-        )
-        mem_res = await db.execute(mem_stmt)
-        mem = mem_res.scalars().first()
-        if not mem:
-            mem = CustomerMemory(
+            booking = Booking(
+                id=booking_id,
                 org_id=org_id,
                 user_id=user_id,
-                memory_key="preferred_practitioner",
-                memory_value=summary["practitioner_name"]
+                conversation_id=conversation_id,
+                service_id=service_id,
+                practitioner_id=practitioner_id,
+                start_time=naive_start,
+                end_time=naive_end,
+                status="confirmed",
+                notes=notes
             )
-            db.add(mem)
-        else:
-            mem.memory_value = summary["practitioner_name"]
+            db.add(booking)
 
-        await db.commit()
-        await db.refresh(booking)
+            # Update ActionProposal status if proposal_id provided
+            pid = proposal_id or summary.get("proposal_id")
+            if pid:
+                prop_stmt = select(ActionProposal).where(ActionProposal.id == pid, ActionProposal.org_id == org_id)
+                prop_res = await db.execute(prop_stmt)
+                prop = prop_res.scalars().first()
+                if prop:
+                    prop.status = "confirmed"
+
+            # Update customer memory (preferred practitioner)
+            mem_stmt = select(CustomerMemory).where(
+                CustomerMemory.org_id == org_id,
+                CustomerMemory.user_id == user_id,
+                CustomerMemory.memory_key == "preferred_practitioner"
+            )
+            mem_res = await db.execute(mem_stmt)
+            mem = mem_res.scalars().first()
+            if not mem:
+                mem = CustomerMemory(
+                    org_id=org_id,
+                    user_id=user_id,
+                    memory_key="preferred_practitioner",
+                    memory_value=summary["practitioner_name"]
+                )
+                db.add(mem)
+            else:
+                mem.memory_value = summary["practitioner_name"]
+
+            await db.commit()
+            await db.refresh(booking)
 
         return {
             "success": True,
@@ -329,41 +366,42 @@ class AgentBTools:
         except ValueError as e:
             return {"success": False, "error": str(e)}
 
-        # Validate new slot (excluding current booking)
-        is_valid, reason = await SchedulingEngine.validate_slot(
-            db, org_id, new_start_dt, service.duration_minutes, booking.practitioner_id, user_id, exclude_booking_id=booking.id
-        )
-
-        if not is_valid:
-            # Rule 4: Refuse and offer nearest free alternatives!
-            alternatives = await SchedulingEngine.find_nearest_alternatives(
-                db, org_id, booking.service_id, new_start_dt, booking.practitioner_id, count=3
+        # Validate new slot (excluding current booking) inside booking_lock
+        async with SchedulingEngine.booking_lock:
+            is_valid, reason = await SchedulingEngine.validate_slot(
+                db, org_id, new_start_dt, service.duration_minutes, booking.practitioner_id, user_id, exclude_booking_id=booking.id
             )
-            return {
-                "success": False,
-                "conflict": True,
-                "error": f"Reschedule refused: {reason}",
-                "suggested_alternatives": alternatives,
-                "card": {
-                    "type": "reschedule_conflict",
-                    "reason": reason,
-                    "suggested_slots": alternatives
-                },
-                "message": (
-                    f"I cannot move booking #{booking_id} to that time because {reason}. "
-                    f"Here are the nearest alternative free slots you can choose from:"
+
+            if not is_valid:
+                # Rule 4: Refuse and offer nearest free alternatives!
+                alternatives = await SchedulingEngine.find_nearest_alternatives(
+                    db, org_id, booking.service_id, new_start_dt, booking.practitioner_id, count=3
                 )
-            }
+                return {
+                    "success": False,
+                    "conflict": True,
+                    "error": f"Reschedule refused: {reason}",
+                    "suggested_alternatives": alternatives,
+                    "card": {
+                        "type": "reschedule_conflict",
+                        "reason": reason,
+                        "suggested_slots": alternatives
+                    },
+                    "message": (
+                        f"I cannot move booking #{booking_id} to that time because {reason}. "
+                        f"Here are the nearest alternative free slots you can choose from:"
+                    )
+                }
 
-        new_end_dt = new_start_dt + datetime.timedelta(minutes=service.duration_minutes)
-        booking.start_time = new_start_dt.replace(tzinfo=None)
-        booking.end_time = new_end_dt.replace(tzinfo=None)
-        booking.status = "rescheduled"
-        booking.reschedule_count = (booking.reschedule_count or 0) + 1
-        booking.updated_at = datetime.datetime.utcnow()
+            new_end_dt = new_start_dt + datetime.timedelta(minutes=service.duration_minutes)
+            booking.start_time = new_start_dt.replace(tzinfo=None)
+            booking.end_time = new_end_dt.replace(tzinfo=None)
+            booking.status = "rescheduled"
+            booking.reschedule_count = (booking.reschedule_count or 0) + 1
+            booking.updated_at = datetime.datetime.utcnow()
 
-        await db.commit()
-        await db.refresh(booking)
+            await db.commit()
+            await db.refresh(booking)
 
         formatted_time = new_start_dt.strftime("%A, %B %d, %Y at %I:%M %p")
         return {
@@ -479,3 +517,4 @@ class AgentBTools:
             "count": len(results),
             "bookings": results
         }
+

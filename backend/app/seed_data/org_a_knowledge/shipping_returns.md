@@ -21,3 +21,4 @@
 - Opened tea pouches cannot be returned or refunded due to food safety and hygiene regulations, unless the product arrived contaminated, degraded, or incorrect.
 - If teaware arrives damaged in transit, report the issue with photographic evidence within 48 hours of delivery to qualify for an immediate free replacement or 100% refund.
 - Approved refunds are processed to the original payment source (e.g. eSewa, Khalti, Bank Transfer, or card) within 3 to 5 business days. Cash on delivery orders are refunded via local digital wallet or bank transfer.
+

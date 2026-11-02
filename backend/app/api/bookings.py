@@ -161,3 +161,4 @@ async def cancel_booking_endpoint(
             detail=res.get("error")
         )
     return res
+

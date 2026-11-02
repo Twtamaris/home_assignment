@@ -28,7 +28,7 @@ def main():
     print("[*] Database and Knowledge Base fixtures loaded.")
 
     # Step 2: Run pytest on test_eval_suite.py and test_tenant_isolation.py
-    print("\n[*] Running 38 automated eval scenarios and security isolation assertions...\n")
+    print("\n[*] Running 43 automated eval scenarios and security isolation assertions...\n")
     pytest_cmd = [
         python_bin, "-m", "pytest",
         str(backend_dir / "tests"),
@@ -39,11 +39,11 @@ def main():
 
     print("\n" + "=" * 80)
     if proc.returncode == 0:
-        print("  ALL SCENARIOS PASSED (100% SUCCESS RATE)")
-        print("  - Agent A (Himali Tea House): 14/14 Scenarios Verified (DB state & business rules)")
-        print("  - Agent B (Lotus Wellness Studio): 14/14 Scenarios Verified (DB state & scheduling engine)")
-        print("  - Admin Analytics Agent: 3/3 Scenarios Verified (Read-only metrics & 403 checks)")
-        print("  - Tenant Isolation & Rate Limiting: 7/7 Security Tests Verified")
+        print("  ALL SCENARIOS PASSED (100% SUCCESS RATE - 43/43 TESTS)")
+        print("  - Agent A (Himali Tea House): 16 Scenarios Verified (Atomic stock, orders, concurrent exhaustion, proposal gate)")
+        print("  - Agent B (Lotus Wellness Studio): 16 Scenarios Verified (Kathmandu slots, holidays, concurrent double-booking mutex)")
+        print("  - Admin Analytics Agent: 3 Scenarios Verified (Read-only metrics, conversation attribution, 403 RBAC)")
+        print("  - Tenant Isolation & Security: 8 Security Tests Verified (Privilege escalation blocked, cross-tenant isolation, rate limiting)")
     else:
         print(f"  [!] Evaluation suite reported failures (Exit code {proc.returncode})")
     print("=" * 80)
@@ -52,3 +52,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+

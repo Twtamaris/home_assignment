@@ -157,3 +157,4 @@ async def cancel_order_endpoint(
             detail=res.get("error")
         )
     return res
+

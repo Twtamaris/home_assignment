@@ -110,3 +110,4 @@ class LLMProvider:
                 "text": choice["message"]["content"],
                 "tool_calls": []
             }
+

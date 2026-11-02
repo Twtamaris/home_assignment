@@ -205,3 +205,24 @@ class AdminTopItems(BaseModel):
     top_items: List[Dict[str, Any]]
     secondary_items: List[Dict[str, Any]]
     definition: str
+
+# --- Action Proposals (Backend Confirmation Gate) ---
+class ActionProposalOut(BaseModel):
+    id: str
+    org_id: str
+    user_id: str
+    conversation_id: Optional[str] = None
+    action_type: str
+    summary_text: str
+    status: str
+    payload: Dict[str, Any]
+    created_at: datetime.datetime
+
+class ActionProposalConfirmResponse(BaseModel):
+    proposal_id: str
+    status: str
+    action_type: str
+    result: Dict[str, Any]
+    message: str
+
+

@@ -264,3 +264,4 @@ This loads `backend/app/seed_data/org_c_example.json` into the platform, instant
 ### How AI Coding Tools were used:
 - AI coding tools were used as a pair programming assistant to accelerate initial boilerplate generation (TypeScript interfaces, initial test cases, and domain data drafting).
 - All business logic, concurrency locks, multi-tenant security verification, database migrations, and evaluation suites were engineered and verified line by line to guarantee correctness, security, and full compliance with the take-home brief.
+

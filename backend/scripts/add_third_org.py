@@ -68,3 +68,4 @@ async def add_third_organisation():
 
 if __name__ == "__main__":
     asyncio.run(add_third_organisation())
+

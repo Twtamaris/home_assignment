@@ -16,8 +16,8 @@ from app.core.database import Base
 from app.core.security import get_password_hash
 from app.models.models import (
     Organisation, User, Product, Service, Practitioner,
-    Holiday, WeeklyOpeningHours, Order, OrderStatusHistory, Booking,
-    KnowledgeChunk, CustomerMemory
+    Holiday, WeeklyOpeningHours, Order, OrderItem, OrderStatusHistory, Booking,
+    KnowledgeChunk, CustomerMemory, Conversation, Message, InventoryEvent
 )
 from app.services.knowledge_base import get_embedding
 if sys.platform == "win32":
@@ -165,13 +165,38 @@ async def seed():
             ))
         await session.commit()
 
-        # 5. Past Orders for Org A Customers (Rule: 3 customers, 2 with past orders)
-        print(" -> Seeding Past Orders for Org A customers...")
+        # 5. Conversations & Past Orders for Org A Customers (Rule: 3 customers, 2 with past orders)
+        print(" -> Seeding Conversations and Past Orders for Org A customers...")
+        conv_a1 = Conversation(
+            id="conv_seed_a1",
+            org_id="org_a",
+            user_id="user_a1",
+            title="Spring Teas Order Inquiry",
+            agent_type="customer"
+        )
+        conv_a2 = Conversation(
+            id="conv_seed_a2",
+            org_id="org_a",
+            user_id="user_a2",
+            title="Green Pearl Tea Purchase",
+            agent_type="customer"
+        )
+        conv_a3 = Conversation(
+            id="conv_seed_a3",
+            org_id="org_a",
+            user_id="user_a3",
+            title="General Catalog Question",
+            agent_type="customer"
+        )
+        session.add_all([conv_a1, conv_a2, conv_a3])
+        await session.commit()
+
         # Order 1 for Aayush (confirmed order)
         o1 = Order(
             id="ORD-1001",
             org_id="org_a",
             user_id="user_a1",
+            conversation_id=conv_a1.id,
             status="confirmed",
             total_price=2800.0,
             shipping_address="Thamel, Kathmandu, Nepal"
@@ -187,6 +212,7 @@ async def seed():
             id="ORD-1002",
             org_id="org_a",
             user_id="user_a1",
+            conversation_id=conv_a1.id,
             status="delivered",
             total_price=1600.0,
             shipping_address="Thamel, Kathmandu, Nepal"
@@ -201,6 +227,7 @@ async def seed():
             id="ORD-1003",
             org_id="org_a",
             user_id="user_a2",
+            conversation_id=conv_a2.id,
             status="pending",
             total_price=1200.0,
             shipping_address="Baluwatar, Kathmandu, Nepal"
@@ -209,8 +236,26 @@ async def seed():
             {"sku": "HT-GT-100", "name": "Dhankuta Imperial Green Pearls (100g)", "unit_price": 1200.0, "quantity": 1, "subtotal": 1200.0}
         ]
         session.add(o3)
+        await session.commit()
 
-        # User A3 (Kiran) has 0 orders
+        # Seed relational OrderItems for analytics & sales accuracy
+        prod_map = {p.sku: p.id for p in (await session.execute(select(Product).where(Product.org_id == "org_a"))).scalars().all()}
+        order_items_to_seed = [
+            OrderItem(org_id="org_a", order_id="ORD-1001", product_id=prod_map.get("HT-SN-100", 1), sku="HT-SN-100", name="Himalayan Spring Silver Needle (100g)", quantity=1, unit_price=1850.0, subtotal=1850.0),
+            OrderItem(org_id="org_a", order_id="ORD-1001", product_id=prod_map.get("HT-BT-100", 2), sku="HT-BT-100", name="Golden Tippy Orthodox Black Tea (100g)", quantity=1, unit_price=950.0, subtotal=950.0),
+            OrderItem(org_id="org_a", order_id="ORD-1002", product_id=prod_map.get("HT-OL-100", 3), sku="HT-OL-100", name="Shangri-La High Mountain Oolong (100g)", quantity=1, unit_price=1600.0, subtotal=1600.0),
+            OrderItem(org_id="org_a", order_id="ORD-1003", product_id=prod_map.get("HT-GT-100", 4), sku="HT-GT-100", name="Dhankuta Imperial Green Pearls (100g)", quantity=1, unit_price=1200.0, subtotal=1200.0),
+        ]
+        session.add_all(order_items_to_seed)
+
+        # Seed initial inventory events
+        inv_events = [
+            InventoryEvent(org_id="org_a", product_id=prod_map.get("HT-SN-100", 1), sku="HT-SN-100", delta=-1, reason="order_created", stock_after=40),
+            InventoryEvent(org_id="org_a", product_id=prod_map.get("HT-BT-100", 2), sku="HT-BT-100", delta=-1, reason="order_created", stock_after=65),
+            InventoryEvent(org_id="org_a", product_id=prod_map.get("HT-OL-100", 3), sku="HT-OL-100", delta=-1, reason="order_created", stock_after=50),
+            InventoryEvent(org_id="org_a", product_id=prod_map.get("HT-GT-100", 4), sku="HT-GT-100", delta=-1, reason="order_created", stock_after=80),
+        ]
+        session.add_all(inv_events)
 
         # Order histories
         session.add(OrderStatusHistory(order_id="ORD-1001", old_status="pending", new_status="confirmed", changed_by="Store Manager", reason="Payment confirmed"))
@@ -218,13 +263,38 @@ async def seed():
         session.add(OrderStatusHistory(order_id="ORD-1003", old_status="none", new_status="pending", changed_by="Customer", reason="Cart order placement"))
         await session.commit()
 
-        # 6. Past Bookings for Org B Customers (Rule: 3 customers, 2 with past bookings)
-        print(" -> Seeding Past Bookings for Org B customers...")
+        # 6. Conversations & Past Bookings for Org B Customers (Rule: 3 customers, 2 with past bookings)
+        print(" -> Seeding Conversations and Past Bookings for Org B customers...")
+        conv_b1 = Conversation(
+            id="conv_seed_b1",
+            org_id="org_b",
+            user_id="user_b1",
+            title="Therapeutic Massage Consultation",
+            agent_type="customer"
+        )
+        conv_b2 = Conversation(
+            id="conv_seed_b2",
+            org_id="org_b",
+            user_id="user_b2",
+            title="Sports Rehab Followup",
+            agent_type="customer"
+        )
+        conv_b3 = Conversation(
+            id="conv_seed_b3",
+            org_id="org_b",
+            user_id="user_b3",
+            title="Yoga Schedule Inquiry",
+            agent_type="customer"
+        )
+        session.add_all([conv_b1, conv_b2, conv_b3])
+        await session.commit()
+
         import datetime
         b1 = Booking(
             id="BKG-2001",
             org_id="org_b",
             user_id="user_b1",
+            conversation_id=conv_b1.id,
             service_id="srv_1",
             practitioner_id="prac_2",
             start_time=datetime.datetime(2026, 11, 2, 10, 0, 0),
@@ -236,6 +306,7 @@ async def seed():
             id="BKG-2002",
             org_id="org_b",
             user_id="user_b2",
+            conversation_id=conv_b2.id,
             service_id="srv_3",
             practitioner_id="prac_1",
             start_time=datetime.datetime(2026, 11, 3, 14, 0, 0),
@@ -243,7 +314,6 @@ async def seed():
             status="confirmed",
             notes="Post-knee arthroscopy follow-up."
         )
-        # User B3 (Bikash) has 0 bookings
         session.add(b1)
         session.add(b2)
         await session.commit()

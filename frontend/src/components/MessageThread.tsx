@@ -236,3 +236,4 @@ export const MessageThread: React.FC<MessageThreadProps> = ({
     </div>
   )
 }
+

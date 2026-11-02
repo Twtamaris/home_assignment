@@ -89,3 +89,4 @@ export interface Booking {
   notes?: string
   created_at: string
 }
+

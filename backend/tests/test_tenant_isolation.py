@@ -134,3 +134,4 @@ async def test_rate_limiting_enforcement():
     with pytest.raises(HTTPException) as exc_info:
         limiter.check(user_id)
     assert exc_info.value.status_code == 429
+

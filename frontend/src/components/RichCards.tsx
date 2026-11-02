@@ -211,3 +211,4 @@ export const RichCard: React.FC<RichCardProps> = ({ card, onAction }) => {
       return null
   }
 }
+

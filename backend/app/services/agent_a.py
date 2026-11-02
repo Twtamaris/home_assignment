@@ -1,9 +1,13 @@
 import uuid
+import json
 import datetime
 from typing import List, Dict, Any, Optional
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select, desc
-from app.models.models import Product, Order, OrderStatusHistory, CustomerMemory
+from sqlalchemy import select, desc, update, delete
+from app.models.models import (
+    Product, Order, OrderItem, OrderStatusHistory, CustomerMemory,
+    ActionProposal, InventoryEvent
+)
 from app.services.knowledge_base import KnowledgeBaseService
 
 class AgentATools:
@@ -142,21 +146,44 @@ class AgentATools:
                 "message": f"Requested quantity exceeds current stock. Available: {stock_issues[0]['available']} units."
             }
 
+        # Stage ActionProposal for backend-enforced confirmation
+        proposal_id = f"prop_ord_{uuid.uuid4().hex[:8]}"
+        proposal_payload = {
+            "items": items,
+            "resolved_items": resolved_items,
+            "total_price": total_price,
+            "shipping_address": shipping_address
+        }
+        proposal = ActionProposal(
+            id=proposal_id,
+            org_id=org_id,
+            user_id=user_id,
+            action_type="create_order",
+            payload_json=json.dumps(proposal_payload),
+            summary_text=f"Order Summary: {len(resolved_items)} items, Total NPR {total_price:.2f}",
+            status="pending",
+            expires_at=datetime.datetime.utcnow() + datetime.timedelta(minutes=30)
+        )
+        db.add(proposal)
+        await db.commit()
+
         return {
             "success": True,
             "is_summary": True,
             "requires_confirmation": True,
+            "proposal_id": proposal_id,
             "items": resolved_items,
             "total_price": total_price,
             "shipping_address": shipping_address,
             "card": {
                 "type": "order_summary",
+                "proposal_id": proposal_id,
                 "title": "Please Confirm Your Order",
                 "items": resolved_items,
                 "total_price": total_price,
                 "shipping_address": shipping_address
             },
-            "summary_text": f"Order Summary: {len(resolved_items)} items, Total NPR {total_price:.2f}. Would you like to confirm and place this order?"
+            "summary_text": f"Order Summary: {len(resolved_items)} items, Total NPR {total_price:.2f}. Proposal #{proposal_id} staged. Would you like to confirm and place this order?"
         }
 
     @staticmethod
@@ -166,12 +193,14 @@ class AgentATools:
         user_id: str,
         items: List[Dict[str, Any]],
         shipping_address: Optional[str] = "Kathmandu, Nepal",
-        confirmed: bool = True
+        confirmed: bool = True,
+        proposal_id: Optional[str] = None,
+        conversation_id: Optional[str] = None
     ) -> Dict[str, Any]:
         """
-        Creates confirmed pending order in DB and decrements stock.
+        Creates confirmed pending order in DB with ATOMIC stock decrement and audit records.
         """
-        # Validate stock first
+        # Validate stock & items
         summary = await AgentATools.prepare_order_summary(db, org_id, user_id, items, shipping_address)
         if not summary.get("success"):
             return summary
@@ -180,18 +209,51 @@ class AgentATools:
         resolved_items = summary["items"]
         total_price = summary["total_price"]
 
-        # Decrement product stock in atomic transaction
+        # Atomic stock decrement and InventoryEvent logging
         for item in resolved_items:
-            stmt = select(Product).where(Product.org_id == org_id, Product.sku == item["sku"])
+            sku = item["sku"]
+            qty = item["quantity"]
+
+            # ATOMIC SQL UPDATE: ensures stock >= qty at DB level
+            stmt = (
+                update(Product)
+                .where(
+                    Product.org_id == org_id,
+                    Product.sku == sku,
+                    Product.stock >= qty
+                )
+                .values(stock=Product.stock - qty)
+            )
             res = await db.execute(stmt)
-            p = res.scalars().first()
-            if p:
-                p.stock = max(0, p.stock - item["quantity"])
+            if res.rowcount == 0:
+                await db.rollback()
+                return {
+                    "success": False,
+                    "error": "Concurrent stock reservation failure",
+                    "message": f"Sorry, {item['name']} just ran out of stock or lacks requested quantity."
+                }
+
+            # Fetch updated product record for accurate post-decrement balance
+            p_stmt = select(Product).where(Product.org_id == org_id, Product.sku == sku)
+            p_res = await db.execute(p_stmt)
+            p_record = p_res.scalars().first()
+
+            # Record InventoryEvent for out-of-stock and inventory analytics
+            inv_event = InventoryEvent(
+                org_id=org_id,
+                product_id=p_record.id,
+                sku=p_record.sku,
+                delta=-qty,
+                reason="order_created",
+                stock_after=p_record.stock
+            )
+            db.add(inv_event)
 
         new_order = Order(
             id=order_id,
             org_id=org_id,
             user_id=user_id,
+            conversation_id=conversation_id,
             status="pending",
             items_json="",
             total_price=total_price,
@@ -199,6 +261,24 @@ class AgentATools:
         )
         new_order.items = resolved_items
         db.add(new_order)
+
+        # Create relational OrderItem rows
+        for item in resolved_items:
+            p_stmt = select(Product).where(Product.org_id == org_id, Product.sku == item["sku"])
+            p_res = await db.execute(p_stmt)
+            p_record = p_res.scalars().first()
+            if p_record:
+                order_item = OrderItem(
+                    org_id=org_id,
+                    order_id=order_id,
+                    product_id=p_record.id,
+                    sku=item["sku"],
+                    name=item["name"],
+                    quantity=item["quantity"],
+                    unit_price=item["unit_price"],
+                    subtotal=item["subtotal"]
+                )
+                db.add(order_item)
 
         # Log initial status in history
         history = OrderStatusHistory(
@@ -209,6 +289,15 @@ class AgentATools:
             reason="Initial order placement"
         )
         db.add(history)
+
+        # Update action proposal status if proposal_id was passed
+        if proposal_id or summary.get("proposal_id"):
+            pid = proposal_id or summary.get("proposal_id")
+            prop_stmt = select(ActionProposal).where(ActionProposal.id == pid, ActionProposal.org_id == org_id)
+            prop_res = await db.execute(prop_stmt)
+            prop = prop_res.scalars().first()
+            if prop:
+                prop.status = "confirmed"
 
         # Save to customer memory (e.g. usual tea)
         if resolved_items:
@@ -287,21 +376,76 @@ class AgentATools:
             if not summary.get("success"):
                 return summary
 
-            # Restore old items stock
+            # Restore old items stock atomically
             for old_i in order.items:
+                stmt_restore = (
+                    update(Product)
+                    .where(Product.org_id == org_id, Product.sku == old_i["sku"])
+                    .values(stock=Product.stock + old_i["quantity"])
+                )
+                await db.execute(stmt_restore)
                 p_stmt = select(Product).where(Product.org_id == org_id, Product.sku == old_i["sku"])
                 p_res = await db.execute(p_stmt)
-                p = p_res.scalars().first()
-                if p:
-                    p.stock += old_i["quantity"]
+                p_rec = p_res.scalars().first()
+                if p_rec:
+                    db.add(InventoryEvent(
+                        org_id=org_id,
+                        product_id=p_rec.id,
+                        sku=p_rec.sku,
+                        delta=old_i["quantity"],
+                        reason="order_updated",
+                        stock_after=p_rec.stock
+                    ))
 
-            # Deduct new items stock
+            # Deduct new items stock atomically
+            for new_i in summary["items"]:
+                stmt_deduct = (
+                    update(Product)
+                    .where(
+                        Product.org_id == org_id,
+                        Product.sku == new_i["sku"],
+                        Product.stock >= new_i["quantity"]
+                    )
+                    .values(stock=Product.stock - new_i["quantity"])
+                )
+                res_deduct = await db.execute(stmt_deduct)
+                if res_deduct.rowcount == 0:
+                    await db.rollback()
+                    return {
+                        "success": False,
+                        "error": f"Insufficient stock for {new_i['name']} during order update."
+                    }
+                p_stmt = select(Product).where(Product.org_id == org_id, Product.sku == new_i["sku"])
+                p_res = await db.execute(p_stmt)
+                p_rec = p_res.scalars().first()
+                if p_rec:
+                    db.add(InventoryEvent(
+                        org_id=org_id,
+                        product_id=p_rec.id,
+                        sku=p_rec.sku,
+                        delta=-new_i["quantity"],
+                        reason="order_updated",
+                        stock_after=p_rec.stock
+                    ))
+
+            # Re-create OrderItem rows
+            del_stmt = delete(OrderItem).where(OrderItem.order_id == order.id)
+            await db.execute(del_stmt)
             for new_i in summary["items"]:
                 p_stmt = select(Product).where(Product.org_id == org_id, Product.sku == new_i["sku"])
                 p_res = await db.execute(p_stmt)
-                p = p_res.scalars().first()
-                if p:
-                    p.stock = max(0, p.stock - new_i["quantity"])
+                p_rec = p_res.scalars().first()
+                if p_rec:
+                    db.add(OrderItem(
+                        org_id=org_id,
+                        order_id=order.id,
+                        product_id=p_rec.id,
+                        sku=new_i["sku"],
+                        name=new_i["name"],
+                        quantity=new_i["quantity"],
+                        unit_price=new_i["unit_price"],
+                        subtotal=new_i["subtotal"]
+                    ))
 
             order.items = summary["items"]
             order.total_price = summary["total_price"]
@@ -365,13 +509,28 @@ class AgentATools:
                 "error": f"Order #{order_id} cannot be cancelled because it is already '{order.status}'. Only orders in 'pending' status can be cancelled."
             }
 
-        # Restock items
+        # Restock items atomically
         for item in order.items:
-            p_stmt = select(Product).where(Product.org_id == org_id, Product.sku == item["sku"])
+            sku = item.get("sku")
+            qty = item.get("quantity", 0)
+            stmt_restore = (
+                update(Product)
+                .where(Product.org_id == org_id, Product.sku == sku)
+                .values(stock=Product.stock + qty)
+            )
+            await db.execute(stmt_restore)
+            p_stmt = select(Product).where(Product.org_id == org_id, Product.sku == sku)
             p_res = await db.execute(p_stmt)
-            p = p_res.scalars().first()
-            if p:
-                p.stock += item.get("quantity", 0)
+            p_rec = p_res.scalars().first()
+            if p_rec:
+                db.add(InventoryEvent(
+                    org_id=org_id,
+                    product_id=p_rec.id,
+                    sku=p_rec.sku,
+                    delta=qty,
+                    reason="order_cancelled",
+                    stock_after=p_rec.stock
+                ))
 
         order.status = "cancelled"
         history = OrderStatusHistory(
@@ -549,3 +708,4 @@ class AgentATools:
             },
             "summary_text": f"Found your previous order #{prev_order.id}. Proposed new total is NPR {new_total:.2f}. " + (" ".join(notes) + " " if notes else "") + "Would you like me to confirm and place this order?"
         }
+

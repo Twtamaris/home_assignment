@@ -20,3 +20,4 @@
 - **Specialties:** Gentle Hatha alignment, prenatal & postnatal mobility, vagus nerve stimulation, and restorative sound immersion.
 - **Languages:** English, Nepali, Newari.
 - **Services Handled:** Private 1-on-1 Hatha & Vinyasa Yoga Session, Sound Bath & Tibetan Singing Bowl Therapy.
+

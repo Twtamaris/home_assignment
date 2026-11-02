@@ -34,13 +34,14 @@ async def register(payload: UserRegister, db: AsyncSession = Depends(get_db)):
         )
 
     user_id = f"user_{uuid.uuid4().hex[:8]}"
+    # Public sign-up always assigns the customer role to prevent privilege escalation
     new_user = User(
         id=user_id,
         org_id=org.id,
         email=payload.email,
         hashed_password=get_password_hash(payload.password),
         name=payload.name,
-        role=payload.role or "customer"
+        role="customer"
     )
     db.add(new_user)
     await db.commit()
@@ -99,3 +100,4 @@ async def login(payload: UserLogin, db: AsyncSession = Depends(get_db)):
 @router.get("/me", response_model=UserOut)
 async def get_me(current_user: User = Depends(get_current_user)):
     return UserOut.from_orm(current_user)
+

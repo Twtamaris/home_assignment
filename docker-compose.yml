@@ -31,3 +31,4 @@ services:
 
 volumes:
   platform_data:
+

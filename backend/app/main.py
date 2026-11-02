@@ -5,7 +5,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from app.core.config import settings
 from app.core.database import async_engine, Base
-from app.api import auth, orgs, chat, orders, bookings, admin
+from app.api import auth, orgs, chat, orders, bookings, admin, actions
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -37,6 +37,7 @@ app.include_router(chat.router, prefix="/api")
 app.include_router(orders.router, prefix="/api")
 app.include_router(bookings.router, prefix="/api")
 app.include_router(admin.router, prefix="/api")
+app.include_router(actions.router, prefix="/api")
 
 @app.get("/api/health")
 async def health_check():
@@ -46,3 +47,4 @@ async def health_check():
         "llm_provider": settings.LLM_PROVIDER,
         "studio_timezone": settings.STUDIO_TIMEZONE
     }
+

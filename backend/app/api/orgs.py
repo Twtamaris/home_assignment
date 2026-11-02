@@ -28,3 +28,4 @@ async def get_organisation(slug_or_id: str, db: AsyncSession = Depends(get_db)):
             detail=f"Organisation '{slug_or_id}' not found."
         )
     return OrgOut.from_orm(org)
+

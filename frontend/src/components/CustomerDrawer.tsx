@@ -212,3 +212,4 @@ export const CustomerDrawer: React.FC<CustomerDrawerProps> = ({ isOpen, onClose,
     </div>
   )
 }
+

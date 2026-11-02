@@ -21,3 +21,4 @@ WORKDIR /app/backend
 
 # Seed database and start uvicorn
 CMD python scripts/seed.py && uvicorn app.main:app --host 0.0.0.0 --port 8000
+

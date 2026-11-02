@@ -67,7 +67,7 @@ class AgentEngine:
 
         # Step 4: Route to the appropriate Agent Handler
         if is_admin_chat:
-            async for sse_event in cls._run_admin_agent(db, user, user_message):
+            async for sse_event in cls._run_admin_agent(db, user, user_message, conversation.id):
                 yield sse_event
         elif org_id == "org_a":
             async for sse_event in cls._run_agent_a(db, user, user_message, memories, recent_messages):
@@ -522,7 +522,8 @@ class AgentEngine:
         cls,
         db: AsyncSession,
         user: User,
-        query: str
+        query: str,
+        conversation_id: str
     ) -> AsyncGenerator[str, None]:
         """
         Admin Analytics Agent:
@@ -633,9 +634,24 @@ class AgentEngine:
             await asyncio.sleep(0.015)
 
         agent_msg_id = f"msg_{datetime.datetime.utcnow().timestamp()}"
+        agent_msg = Message(
+            id=agent_msg_id,
+            conversation_id=conversation_id,
+            org_id=user.org_id,
+            user_id=user.id,
+            sender="agent",
+            content=accumulated,
+            tool_calls_json=json.dumps(tool_activity) if tool_activity else None,
+            citations_json=None,
+            card_json=None
+        )
+        db.add(agent_msg)
+        await db.commit()
+
         yield cls._sse("done", {
             "id": agent_msg_id,
             "content": accumulated,
             "citations": [],
             "card": None
         })
+

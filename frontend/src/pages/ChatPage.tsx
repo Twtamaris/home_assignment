@@ -334,3 +334,4 @@ export const ChatPage: React.FC<ChatPageProps> = ({ user, org }) => {
     </div>
   )
 }
+

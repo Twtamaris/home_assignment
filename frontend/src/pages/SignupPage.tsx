@@ -117,3 +117,4 @@ export const SignupPage: React.FC<SignupPageProps> = ({ onNavigateToLogin, curre
     </div>
   )
 }
+

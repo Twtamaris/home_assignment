@@ -67,3 +67,4 @@ if __name__ == "__main__":
     status_arg = sys.argv[2].lower()
     reason_arg = sys.argv[3] if len(sys.argv) > 3 else "CLI status advancement"
     asyncio.run(advance_order(oid, status_arg, reason_arg))
+

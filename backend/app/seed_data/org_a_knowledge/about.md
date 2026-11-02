@@ -11,3 +11,4 @@ Every package we dispatch uses compostable rice-paper outer pouches, food-grade 
 
 ## The Tea Master
 All Himali blends and single-estate batches are curated and cupped under the supervision of Master Tea Artisan Pema Sherpa, who brings 32 years of orthodox and specialty tea crafting expertise across Darjeeling, Illam, and Dhankuta estates.
+

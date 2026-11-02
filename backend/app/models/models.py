@@ -74,6 +74,7 @@ class Order(Base):
     id = Column(String(50), primary_key=True)  # e.g. "ORD-1001"
     org_id = Column(String(50), ForeignKey("organisations.id", ondelete="CASCADE"), nullable=False, index=True)
     user_id = Column(String(50), ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True)
+    conversation_id = Column(String(50), ForeignKey("conversations.id", ondelete="SET NULL"), nullable=True, index=True)
     status = Column(String(30), default="pending", nullable=False)  # pending, confirmed, shipped, delivered, cancelled
     items_json = Column(Text, nullable=False, default="[]")  # JSON list of {sku, name, quantity, unit_price}
     total_price = Column(Float, nullable=False)
@@ -83,6 +84,7 @@ class Order(Base):
 
     user = relationship("User", back_populates="orders")
     history = relationship("OrderStatusHistory", back_populates="order", cascade="all, delete-orphan")
+    order_items = relationship("OrderItem", back_populates="order", cascade="all, delete-orphan")
 
     @property
     def items(self):
@@ -157,6 +159,7 @@ class Booking(Base):
     id = Column(String(50), primary_key=True)  # e.g. "BKG-2001"
     org_id = Column(String(50), ForeignKey("organisations.id", ondelete="CASCADE"), nullable=False, index=True)
     user_id = Column(String(50), ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True)
+    conversation_id = Column(String(50), ForeignKey("conversations.id", ondelete="SET NULL"), nullable=True, index=True)
     service_id = Column(String(50), ForeignKey("services.id", ondelete="CASCADE"), nullable=False, index=True)
     practitioner_id = Column(String(50), ForeignKey("practitioners.id", ondelete="CASCADE"), nullable=False, index=True)
     start_time = Column(DateTime, nullable=False, index=True)  # Stored as naive UTC or studio time
@@ -249,3 +252,54 @@ class CustomerMemory(Base):
     __table_args__ = (
         UniqueConstraint("org_id", "user_id", "memory_key", name="uq_org_user_memory"),
     )
+
+
+class OrderItem(Base):
+    __tablename__ = "order_items"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    org_id = Column(String(50), ForeignKey("organisations.id", ondelete="CASCADE"), nullable=False, index=True)
+    order_id = Column(String(50), ForeignKey("orders.id", ondelete="CASCADE"), nullable=False, index=True)
+    product_id = Column(Integer, ForeignKey("products.id", ondelete="CASCADE"), nullable=False, index=True)
+    sku = Column(String(50), nullable=False)
+    name = Column(String(150), nullable=False)
+    quantity = Column(Integer, nullable=False)
+    unit_price = Column(Float, nullable=False)
+    subtotal = Column(Float, nullable=False)
+
+    order = relationship("Order", back_populates="order_items")
+    product = relationship("Product")
+
+
+class ActionProposal(Base):
+    __tablename__ = "action_proposals"
+
+    id = Column(String(50), primary_key=True)  # e.g. "prop_abc123"
+    org_id = Column(String(50), ForeignKey("organisations.id", ondelete="CASCADE"), nullable=False, index=True)
+    user_id = Column(String(50), ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True)
+    conversation_id = Column(String(50), ForeignKey("conversations.id", ondelete="SET NULL"), nullable=True, index=True)
+    action_type = Column(String(50), nullable=False)  # "create_order", "update_order", "cancel_order", "create_booking", "reschedule_booking", "cancel_booking"
+    payload_json = Column(Text, nullable=False)  # Full staged parameters as JSON
+    summary_text = Column(Text, nullable=False)  # Human-readable summary
+    status = Column(String(30), default="pending", nullable=False)  # "pending", "confirmed", "rejected", "expired"
+    created_at = Column(DateTime, default=datetime.datetime.utcnow)
+    expires_at = Column(DateTime, nullable=True)
+
+    user = relationship("User")
+
+
+class InventoryEvent(Base):
+    __tablename__ = "inventory_events"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    org_id = Column(String(50), ForeignKey("organisations.id", ondelete="CASCADE"), nullable=False, index=True)
+    product_id = Column(Integer, ForeignKey("products.id", ondelete="CASCADE"), nullable=False, index=True)
+    sku = Column(String(50), nullable=False)
+    delta = Column(Integer, nullable=False)  # e.g. -2 or +10
+    reason = Column(String(50), nullable=False)  # "order_created", "order_cancelled", "order_updated", "stockout", "restock"
+    stock_after = Column(Integer, nullable=False)
+    created_at = Column(DateTime, default=datetime.datetime.utcnow)
+
+    product = relationship("Product")
+
+

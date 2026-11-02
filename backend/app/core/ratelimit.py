@@ -28,3 +28,4 @@ class RateLimiter:
         self.history[user_id] = timestamps
 
 chat_rate_limiter = RateLimiter(limit=settings.RATE_LIMIT_PER_MINUTE, window_seconds=60)
+
