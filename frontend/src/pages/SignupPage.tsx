@@ -1,6 +1,7 @@
 import React, { useState } from 'react'
 import { useAuth } from '../context/AuthContext'
 import { Organisation } from '../types'
+import { extractErrorMessage } from '../api'
 import { ArrowLeft, ArrowRight, UserPlus } from 'lucide-react'
 
 interface SignupPageProps {
@@ -23,7 +24,7 @@ export const SignupPage: React.FC<SignupPageProps> = ({ onNavigateToLogin, curre
     try {
       await register(email, password, name, currentOrg.id)
     } catch (err: any) {
-      setError(err.message || 'Registration failed')
+      setError(extractErrorMessage(err, 'Registration failed'))
     } finally {
       setLoading(false)
     }

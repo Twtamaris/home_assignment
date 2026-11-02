@@ -1,19 +1,36 @@
-from pydantic import BaseModel, EmailStr, Field
+import re
+from pydantic import BaseModel, Field, field_validator
 from typing import Optional, List, Dict, Any
 import datetime
 
 # --- Auth ---
 class UserLogin(BaseModel):
-    email: EmailStr
+    email: str
     password: str
     org_id: Optional[str] = None  # Entrypoint can supply this or derive from host/path
 
+    @field_validator("email")
+    @classmethod
+    def validate_email_format(cls, v: str) -> str:
+        v = v.strip().lower()
+        if not re.match(r"^[^@\s]+@[^@\s]+\.[^@\s]+$", v):
+            raise ValueError("Invalid email format")
+        return v
+
 class UserRegister(BaseModel):
-    email: EmailStr
+    email: str
     password: str
     name: str
     org_id: str
     role: Optional[str] = "customer"
+
+    @field_validator("email")
+    @classmethod
+    def validate_email_format(cls, v: str) -> str:
+        v = v.strip().lower()
+        if not re.match(r"^[^@\s]+@[^@\s]+\.[^@\s]+$", v):
+            raise ValueError("Invalid email format")
+        return v
 
 class UserOut(BaseModel):
     id: str

@@ -1,7 +1,7 @@
 import React, { useState, useEffect } from 'react'
 import { useAuth } from '../context/AuthContext'
 import { Organisation } from '../types'
-import { api } from '../api'
+import { api, extractErrorMessage } from '../api'
 import { Bot, Shield, ArrowRight, Sparkles, CheckCircle2 } from 'lucide-react'
 
 interface LoginPageProps {
@@ -59,7 +59,7 @@ export const LoginPage: React.FC<LoginPageProps> = ({
     try {
       await login(email, password, selectedOrg.id)
     } catch (err: any) {
-      setError(err.message || 'Authentication failed. Please verify credentials.')
+      setError(extractErrorMessage(err, 'Authentication failed. Please verify credentials.'))
     } finally {
       setLoading(false)
     }
@@ -74,7 +74,7 @@ export const LoginPage: React.FC<LoginPageProps> = ({
     try {
       await login(testEmail, 'Password123!', selectedOrg.id)
     } catch (err: any) {
-      setError(err.message || 'Authentication failed. Please verify credentials.')
+      setError(extractErrorMessage(err, 'Authentication failed. Please verify credentials.'))
     } finally {
       setLoading(false)
     }

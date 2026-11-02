@@ -7,6 +7,26 @@ function getAuthHeader(): Record<string, string> {
   return token ? { Authorization: `Bearer ${token}` } : {}
 }
 
+export function extractErrorMessage(err: any, fallback: string): string {
+  if (!err) return fallback
+  const detail = err.detail !== undefined ? err.detail : err.message !== undefined ? err.message : err
+  if (typeof detail === 'string') return detail
+  if (Array.isArray(detail)) {
+    return detail
+      .map((item: any) => {
+        if (typeof item === 'string') return item
+        if (item?.msg) return item.msg
+        return JSON.stringify(item)
+      })
+      .join(', ')
+  }
+  if (typeof detail === 'object') {
+    if (detail.msg) return detail.msg
+    return JSON.stringify(detail)
+  }
+  return String(detail)
+}
+
 export const api = {
   // --- Auth ---
   async login(payload: { email: string; password: string; org_id?: string }): Promise<{ access_token: string; user: User }> {
@@ -17,7 +37,7 @@ export const api = {
     })
     if (!res.ok) {
       const err = await res.json().catch(() => ({ detail: 'Login failed' }))
-      throw new Error(err.detail || 'Login failed')
+      throw new Error(extractErrorMessage(err, 'Login failed'))
     }
     return res.json()
   },
@@ -30,7 +50,7 @@ export const api = {
     })
     if (!res.ok) {
       const err = await res.json().catch(() => ({ detail: 'Registration failed' }))
-      throw new Error(err.detail || 'Registration failed')
+      throw new Error(extractErrorMessage(err, 'Registration failed'))
     }
     return res.json()
   },
@@ -126,7 +146,7 @@ export const api = {
     })
     if (!res.ok) {
       const err = await res.json().catch(() => ({ detail: 'Failed to advance status' }))
-      throw new Error(err.detail)
+      throw new Error(extractErrorMessage(err, 'Failed to advance status'))
     }
     return res.json()
   },
