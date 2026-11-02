@@ -65,9 +65,19 @@ export const LoginPage: React.FC<LoginPageProps> = ({
     }
   }
 
-  const fillQuickLogin = (testEmail: string) => {
+  const handleQuickLogin = async (testEmail: string) => {
+    if (!selectedOrg) return
     setEmail(testEmail)
     setPassword('Password123!')
+    setLoading(true)
+    setError(null)
+    try {
+      await login(testEmail, 'Password123!', selectedOrg.id)
+    } catch (err: any) {
+      setError(err.message || 'Authentication failed. Please verify credentials.')
+    } finally {
+      setLoading(false)
+    }
   }
 
   if (!selectedOrg) {
@@ -119,7 +129,11 @@ export const LoginPage: React.FC<LoginPageProps> = ({
             {selectedOrg.name.charAt(0)}
           </div>
           <h2 className="text-2xl font-bold text-white tracking-tight">{selectedOrg.name}</h2>
-          <p className="text-xs text-slate-400 max-w-sm mx-auto">{selectedOrg.tagline}</p>
+          <p className="text-xs text-slate-300 max-w-sm mx-auto leading-relaxed">
+            {selectedOrg.id === 'org_a' || selectedOrg.slug === 'himali-tea'
+              ? "Hello! I'm your tea assistant. Sign in to track orders or discover new blends."
+              : "Namaste! I'm your wellness assistant. Sign in to book or manage your appointments."}
+          </p>
         </div>
 
         {/* Form Card */}
@@ -178,38 +192,38 @@ export const LoginPage: React.FC<LoginPageProps> = ({
                 <>
                   <button
                     type="button"
-                    onClick={() => fillQuickLogin('aayush@himali.test')}
-                    className="p-2 rounded-lg bg-slate-800/80 hover:bg-slate-700/80 text-left border border-slate-700 transition"
+                    onClick={() => handleQuickLogin('aayush@himali.test')}
+                    className="p-2.5 rounded-xl bg-slate-800/80 hover:bg-slate-700/80 text-left border border-slate-700 transition active:scale-98"
                   >
-                    <div className="font-medium text-slate-200 truncate">Aayush (Customer)</div>
-                    <div className="text-[10px] text-slate-400">Past Orders</div>
+                    <div className="font-semibold text-slate-200 truncate">Aayush (Customer)</div>
+                    <div className="text-[10px] text-slate-400">aayush@himali.test</div>
                   </button>
                   <button
                     type="button"
-                    onClick={() => fillQuickLogin('admin@himali.test')}
-                    className="p-2 rounded-lg bg-purple-950/40 hover:bg-purple-900/50 text-left border border-purple-500/30 transition"
+                    onClick={() => handleQuickLogin('admin@himali.test')}
+                    className="p-2.5 rounded-xl bg-purple-950/40 hover:bg-purple-900/50 text-left border border-purple-500/30 transition active:scale-98"
                   >
-                    <div className="font-medium text-purple-200 truncate">Himali Admin</div>
-                    <div className="text-[10px] text-purple-400">Admin Role</div>
+                    <div className="font-semibold text-purple-200 truncate">Himali Admin</div>
+                    <div className="text-[10px] text-purple-400">admin@himali.test</div>
                   </button>
                 </>
               ) : (
                 <>
                   <button
                     type="button"
-                    onClick={() => fillQuickLogin('rohan@lotus.test')}
-                    className="p-2 rounded-lg bg-slate-800/80 hover:bg-slate-700/80 text-left border border-slate-700 transition"
+                    onClick={() => handleQuickLogin('sita@lotus.test')}
+                    className="p-2.5 rounded-xl bg-slate-800/80 hover:bg-slate-700/80 text-left border border-slate-700 transition active:scale-98"
                   >
-                    <div className="font-medium text-slate-200 truncate">Rohan (Customer)</div>
-                    <div className="text-[10px] text-slate-400">Past Bookings</div>
+                    <div className="font-semibold text-slate-200 truncate">Sita (Customer)</div>
+                    <div className="text-[10px] text-slate-400">sita@lotus.test</div>
                   </button>
                   <button
                     type="button"
-                    onClick={() => fillQuickLogin('admin@lotus.test')}
-                    className="p-2 rounded-lg bg-purple-950/40 hover:bg-purple-900/50 text-left border border-purple-500/30 transition"
+                    onClick={() => handleQuickLogin('admin@lotus.test')}
+                    className="p-2.5 rounded-xl bg-purple-950/40 hover:bg-purple-900/50 text-left border border-purple-500/30 transition active:scale-98"
                   >
-                    <div className="font-medium text-purple-200 truncate">Lotus Admin</div>
-                    <div className="text-[10px] text-purple-400">Admin Role</div>
+                    <div className="font-semibold text-purple-200 truncate">Lotus Admin</div>
+                    <div className="text-[10px] text-purple-400">admin@lotus.test</div>
                   </button>
                 </>
               )}
