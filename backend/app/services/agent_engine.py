@@ -128,27 +128,39 @@ class AgentEngine:
 
         # Check for Order Confirmation (e.g. "confirm", "yes place it", "yes please confirm")
         elif any(phrase in q_lower for phrase in ["confirm order", "yes please confirm", "confirm my order", "place it", "confirm"]):
-            yield cls._sse("tool_start", {"tool": "create_order", "message": "Confirming and placing order..."})
+            yield cls._sse("tool_start", {"tool": "create_order", "message": "Confirming and placing order from staged proposal..."})
             await asyncio.sleep(0.1)
 
-            # Look up unconfirmed order draft from latest user memory or items
-            usual_tea = memories.get("usual_tea", "HT-SN-100")
-            sku = "HT-SN-100" if "silver" in usual_tea.lower() or "ht-" not in usual_tea.lower() else usual_tea
+            # Look up latest pending ActionProposal for this user in org_a
+            prop_stmt = select(ActionProposal).where(
+                ActionProposal.org_id == user.org_id,
+                ActionProposal.user_id == user.id,
+                ActionProposal.action_type == "create_order",
+                ActionProposal.status == "pending"
+            ).order_by(desc(ActionProposal.created_at))
+            prop_res = await db.execute(prop_stmt)
+            latest_prop = prop_res.scalars().first()
 
-            create_res = await AgentATools.create_order(
-                db, user.org_id, user.id,
-                items=[{"sku": sku, "quantity": 1}],
-                shipping_address="Kathmandu Valley, Nepal",
-                confirmed=True
-            )
-            tool_activity.append({"tool": "create_order", "result": create_res})
-            yield cls._sse("tool_end", {"tool": "create_order", "status": "completed"})
+            if latest_prop:
+                prop_data = json.loads(latest_prop.payload_json)
+                create_res = await AgentATools.create_order(
+                    db, user.org_id, user.id,
+                    items=prop_data.get("items", []),
+                    shipping_address=prop_data.get("shipping_address", "Kathmandu Valley, Nepal"),
+                    confirmed=True,
+                    proposal_id=latest_prop.id
+                )
+                tool_activity.append({"tool": "create_order", "result": create_res})
+                yield cls._sse("tool_end", {"tool": "create_order", "status": "completed"})
 
-            if create_res.get("success"):
-                card_data = create_res.get("card")
-                final_text = create_res.get("message")
+                if create_res.get("success"):
+                    card_data = create_res.get("card")
+                    final_text = create_res.get("message")
+                else:
+                    final_text = create_res.get("message") or create_res.get("error", "Unable to place order.")
             else:
-                final_text = create_res.get("message", create_res.get("error", "Unable to place order."))
+                yield cls._sse("tool_end", {"tool": "create_order", "status": "failed"})
+                final_text = "I couldn't find an active pending order proposal to confirm. Please tell me which tea and quantity you'd like to order, and I'll prepare a summary for you."
 
         # Check for Cancellation (e.g. "cancel order ORD-...", "cancel my latest order", "cancel my order")
         elif "cancel" in q_lower and ("order" in q_lower or "ord-" in q_lower or "latest" in q_lower):

@@ -80,7 +80,8 @@ class AgentATools:
         org_id: str,
         user_id: str,
         items: List[Dict[str, Any]],
-        shipping_address: Optional[str] = "Kathmandu, Nepal"
+        shipping_address: Optional[str] = "Kathmandu, Nepal",
+        stage_proposal: bool = True
     ) -> Dict[str, Any]:
         """
         Business Rule 1 & 2:
@@ -146,26 +147,28 @@ class AgentATools:
                 "message": f"Requested quantity exceeds current stock. Available: {stock_issues[0]['available']} units."
             }
 
-        # Stage ActionProposal for backend-enforced confirmation
-        proposal_id = f"prop_ord_{uuid.uuid4().hex[:8]}"
-        proposal_payload = {
-            "items": items,
-            "resolved_items": resolved_items,
-            "total_price": total_price,
-            "shipping_address": shipping_address
-        }
-        proposal = ActionProposal(
-            id=proposal_id,
-            org_id=org_id,
-            user_id=user_id,
-            action_type="create_order",
-            payload_json=json.dumps(proposal_payload),
-            summary_text=f"Order Summary: {len(resolved_items)} items, Total NPR {total_price:.2f}",
-            status="pending",
-            expires_at=datetime.datetime.utcnow() + datetime.timedelta(minutes=30)
-        )
-        db.add(proposal)
-        await db.commit()
+        proposal_id = None
+        if stage_proposal:
+            # Stage ActionProposal for backend-enforced confirmation
+            proposal_id = f"prop_ord_{uuid.uuid4().hex[:8]}"
+            proposal_payload = {
+                "items": items,
+                "resolved_items": resolved_items,
+                "total_price": total_price,
+                "shipping_address": shipping_address
+            }
+            proposal = ActionProposal(
+                id=proposal_id,
+                org_id=org_id,
+                user_id=user_id,
+                action_type="create_order",
+                payload_json=json.dumps(proposal_payload),
+                summary_text=f"Order Summary: {len(resolved_items)} items, Total NPR {total_price:.2f}",
+                status="pending",
+                expires_at=datetime.datetime.utcnow() + datetime.timedelta(minutes=30)
+            )
+            db.add(proposal)
+            await db.commit()
 
         return {
             "success": True,
@@ -183,7 +186,7 @@ class AgentATools:
                 "total_price": total_price,
                 "shipping_address": shipping_address
             },
-            "summary_text": f"Order Summary: {len(resolved_items)} items, Total NPR {total_price:.2f}. Proposal #{proposal_id} staged. Would you like to confirm and place this order?"
+            "summary_text": f"Order Summary: {len(resolved_items)} items, Total NPR {total_price:.2f}. " + (f"Proposal #{proposal_id} staged. " if proposal_id else "") + "Would you like to confirm and place this order?"
         }
 
     @staticmethod
@@ -191,7 +194,7 @@ class AgentATools:
         db: AsyncSession,
         org_id: str,
         user_id: str,
-        items: List[Dict[str, Any]],
+        items: Optional[List[Dict[str, Any]]] = None,
         shipping_address: Optional[str] = "Kathmandu, Nepal",
         confirmed: bool = True,
         proposal_id: Optional[str] = None,
@@ -199,9 +202,27 @@ class AgentATools:
     ) -> Dict[str, Any]:
         """
         Creates confirmed pending order in DB with ATOMIC stock decrement and audit records.
+        Strictly adheres to exact items and pricing from ActionProposal when proposal_id is provided.
         """
-        # Validate stock & items
-        summary = await AgentATools.prepare_order_summary(db, org_id, user_id, items, shipping_address)
+        existing_prop = None
+        if proposal_id:
+            prop_stmt = select(ActionProposal).where(ActionProposal.id == proposal_id, ActionProposal.org_id == org_id)
+            prop_res = await db.execute(prop_stmt)
+            existing_prop = prop_res.scalars().first()
+            if existing_prop:
+                prop_data = json.loads(existing_prop.payload_json)
+                if not items:
+                    items = prop_data.get("items", [])
+                if not shipping_address or shipping_address == "Kathmandu, Nepal":
+                    shipping_address = prop_data.get("shipping_address", shipping_address)
+
+        if not items:
+            return {"success": False, "error": "No order items specified to create order."}
+
+        # Validate stock & items without creating a duplicate proposal
+        summary = await AgentATools.prepare_order_summary(
+            db, org_id, user_id, items, shipping_address, stage_proposal=False
+        )
         if not summary.get("success"):
             return summary
 
@@ -291,9 +312,10 @@ class AgentATools:
         db.add(history)
 
         # Update action proposal status if proposal_id was passed
-        if proposal_id or summary.get("proposal_id"):
-            pid = proposal_id or summary.get("proposal_id")
-            prop_stmt = select(ActionProposal).where(ActionProposal.id == pid, ActionProposal.org_id == org_id)
+        if existing_prop:
+            existing_prop.status = "confirmed"
+        elif proposal_id:
+            prop_stmt = select(ActionProposal).where(ActionProposal.id == proposal_id, ActionProposal.org_id == org_id)
             prop_res = await db.execute(prop_stmt)
             prop = prop_res.scalars().first()
             if prop:
