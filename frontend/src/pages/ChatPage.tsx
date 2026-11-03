@@ -210,7 +210,10 @@ export const ChatPage: React.FC<ChatPageProps> = ({ user, org }) => {
           try { payload = JSON.parse(data) } catch { payload = {} }
           if (event === 'tool_start') setActiveToolMessage(payload.message || 'Working...')
           else if (event === 'tool_end') setActiveToolMessage(null)
-          else if (event === 'token') {
+          else if (event === 'reset') {
+            streamedRef.current = ''
+            setStreamingContent('')
+          } else if (event === 'token') {
             streamedRef.current += payload.token
             setStreamingContent(streamedRef.current)
           }

@@ -1,13 +1,15 @@
 """One tool-calling loop for retail, studio and admin chats."""
 import json
+import datetime
 import logging
+import re
 import uuid
 from typing import Any, AsyncGenerator, Dict, List
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.models.models import Conversation, CustomerMemory, Message, Organisation, User
+from app.models.models import ActionProposal, Conversation, CustomerMemory, Message, Organisation, User
 from app.services.llm_provider import ChatMessage, LLMError, LLMProvider
 from app.services.scheduling import SchedulingEngine
 from app.services.tool_registry import MUTATION_TOOLS, dispatch_tool, tools_for, validate_call
@@ -19,6 +21,21 @@ _PLACEHOLDER_TITLES = {
     "New Chat", "New Conversation", "New Inquiries", "New Analytics Inquiry", "Store Performance Review",
 }
 MAX_HISTORY_MESSAGES = 12
+
+# A reply that sends the customer to a Confirm button when the model never staged anything.
+_CONFIRM_CLAIM = re.compile(
+    r"\b(?:press|click|tap|hit|use|select)\b[^.\n]{0,40}\bconfirm\b|\breview\b[^.\n]{0,60}\babove\b",
+    re.IGNORECASE,
+)
+_NO_CARD_NUDGE = (
+    "System note: no confirmation card exists yet, because you did not call a tool. Do not describe a card or tell the "
+    "customer to press Confirm. Call the matching tool now (book, reschedule, cancel or order) with the ids and times "
+    "from this conversation, and wait for its result."
+)
+_NO_CARD_FALLBACK = (
+    "Sorry, I could not prepare that change just now, so nothing was changed. "
+    "Please send the request again, for example with the booking or order id and the exact date and time."
+)
 
 
 class AgentLoop:
@@ -86,6 +103,7 @@ class AgentLoop:
         tool_activity = []
         final_text = ""
         active_tools = tool_schemas
+        nudged = False
         log.info("chat org=%s user=%s conv=%s text=%s", user.org_id, user.id, conversation.id, user_message[:180])
         yield cls._sse("tool_start", {"tool": "thinking", "message": "Thinking..."})
         thinking = True
@@ -152,6 +170,20 @@ class AgentLoop:
                             yield cls._sse("token", {"token": token})
                         break
                     continue
+
+                if not is_admin and _claims_confirmation_card(final_text or turn.text) and not await _has_pending_proposal(db, user, conversation.id):
+                    # The reply tells the customer to press a Confirm button, but no proposal exists, so no card will be shown.
+                    yield cls._sse("reset", {})
+                    if not nudged:
+                        nudged = True
+                        log.warning("chat claimed a confirmation card without staging one org=%s user=%s; retrying", user.org_id, user.id)
+                        messages.append(ChatMessage(role="model", content=final_text or turn.text))
+                        messages.append(ChatMessage(role="user", content=_NO_CARD_NUDGE))
+                        final_text = ""
+                        continue
+                    final_text = _NO_CARD_FALLBACK
+                    yield cls._sse("token", {"token": final_text})
+                    break
 
                 if not final_text:
                     final_text = turn.text or "I could not complete that."
@@ -226,6 +258,24 @@ def _system_prompt(org: Organisation | None, kind: str, is_admin: bool) -> str:
         "Answer policy, FAQ and brewing questions with search_knowledge and cite the document. "
         "If the knowledge base has no answer, say you do not have that information."
     )
+
+
+def _claims_confirmation_card(text: str) -> bool:
+    return bool(text and _CONFIRM_CLAIM.search(text))
+
+
+async def _has_pending_proposal(db: AsyncSession, user: User, conversation_id: str) -> bool:
+    """True when this customer has a live proposal in the chat, so 'press Confirm' points at a real card."""
+    row = (await db.execute(
+        select(ActionProposal.id).where(
+            ActionProposal.org_id == user.org_id,
+            ActionProposal.user_id == user.id,
+            ActionProposal.conversation_id == conversation_id,
+            ActionProposal.status == "pending",
+            ActionProposal.expires_at > datetime.datetime.utcnow(),
+        ).limit(1)
+    )).first()
+    return row is not None
 
 
 def _title_from(text: str) -> str:
