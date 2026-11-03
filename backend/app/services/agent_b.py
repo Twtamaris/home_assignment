@@ -31,14 +31,26 @@ class AgentBTools:
             "success": True,
             "query": query,
             "results": results,
-            "citations": [r["citation"] for r in results]
+            "answerable": bool(results),
+            "note": (
+                "Answer only from these passages and cite them. Prices, hours and availability must come from list_services, get_opening_hours and find_available_slots."
+                if results else
+                "No relevant passage found. Say you do not have that information; do not guess."
+            ),
+            "citations": [
+                {
+                    "doc": result.get("doc_name") or "Knowledge",
+                    "section": result.get("section_name") or "",
+                    "excerpt": result.get("content") or "",
+                }
+                for result in results
+            ]
         }
 
     @staticmethod
     async def list_services(db: AsyncSession, org_id: str) -> Dict[str, Any]:
-        stmt = select(Service).where(Service.org_id == org_id)
-        res = await db.execute(stmt)
-        services = res.scalars().all()
+        services = (await db.execute(select(Service).where(Service.org_id == org_id))).scalars().all()
+        practitioners = (await db.execute(select(Practitioner).where(Practitioner.org_id == org_id))).scalars().all()
         return {
             "success": True,
             "services": [
@@ -47,10 +59,63 @@ class AgentBTools:
                     "name": s.name,
                     "duration_minutes": s.duration_minutes,
                     "price": s.price,
-                    "description": s.description
+                    "description": s.description,
+                    "practitioner_ids": [p.id for p in practitioners if SchedulingEngine.practitioner_offers(p, s)],
                 }
                 for s in services
-            ]
+            ],
+            # Ids the other tools need. A practitioner may only be booked for the services listed here.
+            "practitioners": [
+                {
+                    "id": p.id,
+                    "name": p.name,
+                    "title": p.title,
+                    "offers_service_ids": [s.id for s in services if SchedulingEngine.practitioner_offers(p, s)],
+                }
+                for p in practitioners
+            ],
+        }
+
+    @staticmethod
+    async def resolve_service(db: AsyncSession, org_id: str, ref: Optional[str]) -> Optional[Service]:
+        """A service by id, or by name (case-insensitive, partial). None if it matches nothing or is ambiguous."""
+        if not ref:
+            return None
+        services = (await db.execute(select(Service).where(Service.org_id == org_id))).scalars().all()
+        needle = ref.strip().lower()
+        exact = [s for s in services if s.id.lower() == needle or s.name.lower() == needle]
+        if exact:
+            return exact[0]
+        partial = [s for s in services if needle in s.name.lower() or s.name.lower() in needle]
+        return partial[0] if len(partial) == 1 else None
+
+    @staticmethod
+    async def resolve_practitioner(db: AsyncSession, org_id: str, ref: Optional[str]) -> Optional[Practitioner]:
+        """A practitioner by id or by name ("Master Tenzing", "Dr. Sunita"). None if unknown or ambiguous."""
+        if not ref:
+            return None
+        people = (await db.execute(select(Practitioner).where(Practitioner.org_id == org_id))).scalars().all()
+        needle = ref.strip().lower()
+        exact = [p for p in people if p.id.lower() == needle or p.name.lower() == needle]
+        if exact:
+            return exact[0]
+        words = [w for w in needle.replace(".", " ").split() if w not in {"dr", "master", "mr", "ms", "mrs"} and len(w) > 2]
+        partial = [p for p in people if needle in p.name.lower() or (words and all(w in p.name.lower() for w in words))]
+        return partial[0] if len(partial) == 1 else None
+
+    @staticmethod
+    async def _unknown(db: AsyncSession, org_id: str, kind: str, ref: str) -> Dict[str, Any]:
+        """A clear error listing the valid choices, so the model can correct itself instead of reporting no slots."""
+        if kind == "practitioner":
+            rows = (await db.execute(select(Practitioner).where(Practitioner.org_id == org_id))).scalars().all()
+            options = [f"{r.id} ({r.name})" for r in rows]
+        else:
+            rows = (await db.execute(select(Service).where(Service.org_id == org_id))).scalars().all()
+            options = [f"{r.id} ({r.name})" for r in rows]
+        return {
+            "success": False,
+            "error": f"Unknown {kind} '{ref}'. Valid {kind}s: {', '.join(options)}.",
+            "message": f"I could not match '{ref}' to a {kind}. Use one of: {', '.join(options)}.",
         }
 
     @staticmethod
@@ -64,8 +129,9 @@ class AgentBTools:
         for r in hours_records:
             weekly[r.day_of_week] = "Closed" if r.is_closed else f"{r.open_time} - {r.close_time}"
 
-        # Holidays
-        hol_stmt = select(Holiday).where(Holiday.org_id == org_id)
+        # Upcoming holidays only, soonest first
+        today = SchedulingEngine.now_kathmandu().strftime("%Y-%m-%d")
+        hol_stmt = select(Holiday).where(Holiday.org_id == org_id, Holiday.holiday_date >= today).order_by(Holiday.holiday_date)
         hol_res = await db.execute(hol_stmt)
         holidays = [{"date": h.holiday_date, "name": h.name} for h in hol_res.scalars().all()]
 
@@ -86,24 +152,56 @@ class AgentBTools:
         org_id: str,
         service_id: str,
         date_str: str,
-        practitioner_id: Optional[str] = None
+        practitioner_id: Optional[str] = None,
+        user_id: Optional[str] = None,
+        part_of_day: Optional[str] = None,
     ) -> Dict[str, Any]:
+        service = await AgentBTools.resolve_service(db, org_id, service_id)
+        if service is None:
+            return await AgentBTools._unknown(db, org_id, "service", service_id)
+        service_id = service.id
+        if practitioner_id:
+            practitioner = await AgentBTools.resolve_practitioner(db, org_id, practitioner_id)
+            if practitioner is None:
+                return await AgentBTools._unknown(db, org_id, "practitioner", practitioner_id)
+            practitioner_id = practitioner.id
+            if not SchedulingEngine.practitioner_offers(practitioner, service):
+                return {
+                    "success": False,
+                    "error": f"{practitioner.name} does not offer {service.name}.",
+                    "message": f"{practitioner.name} does not offer {service.name}. Omit practitioner_id to see everyone who does.",
+                }
         slots = await SchedulingEngine.find_available_slots(
-            db, org_id, service_id, date_str, practitioner_id
+            db, org_id, service_id, date_str, practitioner_id,
+            customer_id=user_id, part_of_day=part_of_day,
         )
-        return {
+        label = f" ({part_of_day})" if part_of_day else ""
+        result: Dict[str, Any] = {
             "success": True,
             "service_id": service_id,
+            "service_name": service.name,
             "date": date_str,
+            "timezone": "Asia/Kathmandu (UTC+05:45)",
             "count": len(slots),
-            "slots": slots,
+            "slots": [
+                {k: s[k] for k in ("practitioner_id", "practitioner_name", "start_time", "formatted")}
+                for s in slots[:40]
+            ],
             "card": {
                 "type": "slot_picker",
-                "title": f"Available Slots for {date_str}",
+                "title": f"{service.name}: free slots on {date_str}{label}",
                 "service_id": service_id,
-                "slots": slots[:10]  # top 10
-            } if slots else None
+                "service_name": service.name,
+                "slots": slots[:12],
+                "total": len(slots),
+            } if slots else None,
         }
+        if not slots:
+            result["message"] = (
+                "No free slots on that date. The studio may be closed (holiday or day off), the day may be fully "
+                "booked, or the time has passed. Offer to check another date."
+            )
+        return result
 
     @staticmethod
     async def prepare_booking_summary(
@@ -112,24 +210,31 @@ class AgentBTools:
         user_id: str,
         service_id: str,
         practitioner_id: str,
-        start_time_str: str
+        start_time_str: str,
+        stage_proposal: bool = True,
+        conversation_id: Optional[str] = None,
+        commit: bool = True,
     ) -> Dict[str, Any]:
         """
         Business Rule 5: Confirms service, practitioner, date, time and price before booking.
         """
-        # Validate service
-        s_stmt = select(Service).where(Service.id == service_id, Service.org_id == org_id)
-        s_res = await db.execute(s_stmt)
-        service = s_res.scalars().first()
+        service = await AgentBTools.resolve_service(db, org_id, service_id)
         if not service:
-            return {"success": False, "error": f"Service '{service_id}' not found."}
-
-        # Validate practitioner
-        p_stmt = select(Practitioner).where(Practitioner.id == practitioner_id, Practitioner.org_id == org_id)
-        p_res = await db.execute(p_stmt)
-        practitioner = p_res.scalars().first()
+            return await AgentBTools._unknown(db, org_id, "service", service_id)
+        practitioner = await AgentBTools.resolve_practitioner(db, org_id, practitioner_id)
         if not practitioner:
-            return {"success": False, "error": f"Practitioner '{practitioner_id}' not found."}
+            return await AgentBTools._unknown(db, org_id, "practitioner", practitioner_id)
+        service_id, practitioner_id = service.id, practitioner.id
+
+        if not SchedulingEngine.practitioner_offers(practitioner, service):
+            qualified = (await db.execute(select(Practitioner).where(Practitioner.org_id == org_id))).scalars().all()
+            names = [p.name for p in qualified if SchedulingEngine.practitioner_offers(p, service)]
+            return {
+                "success": False,
+                "error": f"{practitioner.name} does not offer {service.name}.",
+                "message": f"{practitioner.name} does not offer {service.name}. Practitioners who do: {', '.join(names) or 'none'}.",
+                "qualified_practitioners": names,
+            }
 
         # Parse start_time in Asia/Kathmandu
         try:
@@ -144,40 +249,45 @@ class AgentBTools:
         if not is_valid:
             # Find alternatives
             alternatives = await SchedulingEngine.find_nearest_alternatives(
-                db, org_id, service_id, start_dt, practitioner_id, count=3
+                db, org_id, service_id, start_dt, practitioner_id, count=3, customer_id=user_id
             )
             return {
                 "success": False,
                 "error": reason,
                 "suggested_alternatives": alternatives,
+                "card": {"type": "slot_picker", "title": "Nearest free alternatives", "service_id": service_id,
+                         "service_name": service.name, "slots": alternatives, "total": len(alternatives)} if alternatives else None,
                 "message": f"Cannot book this slot: {reason} Here are nearest available slots."
             }
 
         end_dt = start_dt + datetime.timedelta(minutes=service.duration_minutes)
 
-        # Stage ActionProposal for backend-enforced confirmation
-        proposal_id = f"prop_bkg_{uuid.uuid4().hex[:8]}"
-        proposal_payload = {
-            "service_id": service.id,
-            "service_name": service.name,
-            "practitioner_id": practitioner.id,
-            "practitioner_name": practitioner.name,
-            "start_time": start_dt.isoformat(),
-            "end_time": end_dt.isoformat(),
-            "price": service.price
-        }
-        proposal = ActionProposal(
-            id=proposal_id,
-            org_id=org_id,
-            user_id=user_id,
-            action_type="create_booking",
-            payload_json=json.dumps(proposal_payload),
-            summary_text=f"Booking Summary: {service.name} with {practitioner.name} on {start_dt.strftime('%A, %b %d at %I:%M %p')}",
-            status="pending",
-            expires_at=datetime.datetime.utcnow() + datetime.timedelta(minutes=30)
-        )
-        db.add(proposal)
-        await db.commit()
+        proposal_id = None
+        if stage_proposal:
+            proposal_id = f"prop_bkg_{uuid.uuid4().hex[:8]}"
+            proposal_payload = {
+                "service_id": service.id,
+                "service_name": service.name,
+                "practitioner_id": practitioner.id,
+                "practitioner_name": practitioner.name,
+                "start_time": start_dt.isoformat(),
+                "end_time": end_dt.isoformat(),
+                "price": service.price,
+            }
+            proposal = ActionProposal(
+                id=proposal_id,
+                org_id=org_id,
+                user_id=user_id,
+                conversation_id=conversation_id,
+                action_type="create_booking",
+                payload_json=json.dumps(proposal_payload),
+                summary_text=f"Booking Summary: {service.name} with {practitioner.name} on {start_dt.strftime('%A, %b %d at %I:%M %p')}",
+                status="pending",
+                expires_at=datetime.datetime.utcnow() + datetime.timedelta(minutes=30),
+            )
+            db.add(proposal)
+            if commit:
+                await db.commit()
 
         return {
             "success": True,
@@ -202,12 +312,14 @@ class AgentBTools:
                 "start_time": start_dt.isoformat(),
                 "formatted_time": start_dt.strftime("%A, %B %d, %Y at %I:%M %p"),
                 "duration_minutes": service.duration_minutes,
-                "price": service.price
+                "price": service.price,
+                "action": "book",
+                "confirm_label": "Confirm Booking",
             },
             "summary_text": (
                 f"Booking Summary: {service.name} ({service.duration_minutes} min) with {practitioner.name} "
                 f"on {start_dt.strftime('%A, %b %d, %Y at %I:%M %p')} for NPR {service.price:.2f}. "
-                f"Proposal #{proposal_id} staged. Would you like me to confirm this booking?"
+                + (f"Proposal #{proposal_id} staged. Would you like me to confirm this booking?" if proposal_id else "Confirm this booking on the card to save it.")
             )
         }
 
@@ -221,14 +333,19 @@ class AgentBTools:
         start_time_str: str,
         notes: Optional[str] = None,
         proposal_id: Optional[str] = None,
-        conversation_id: Optional[str] = None
+        conversation_id: Optional[str] = None,
+        stage_proposal: bool = True,
+        manage_transaction: bool = True,
     ) -> Dict[str, Any]:
         """
         Creates confirmed booking in DB.
         Safe against race conditions with atomic transactional validation and slot mutex lock.
         """
         summary = await AgentBTools.prepare_booking_summary(
-            db, org_id, user_id, service_id, practitioner_id, start_time_str
+            db, org_id, user_id, service_id, practitioner_id, start_time_str,
+            stage_proposal=stage_proposal,
+            conversation_id=conversation_id,
+            commit=manage_transaction,
         )
         if not summary.get("success"):
             return summary
@@ -255,7 +372,7 @@ class AgentBTools:
                     "success": False,
                     "error": "This slot was just booked by another customer. Please choose another slot.",
                     "suggested_alternatives": await SchedulingEngine.find_nearest_alternatives(
-                        db, org_id, service_id, start_dt, practitioner_id, count=3
+                        db, org_id, service_id, start_dt, practitioner_id, count=3, customer_id=user_id
                     )
                 }
 
@@ -301,8 +418,10 @@ class AgentBTools:
             else:
                 mem.memory_value = summary["practitioner_name"]
 
-            await db.commit()
-            await db.refresh(booking)
+            await db.flush()
+            if manage_transaction:
+                await db.commit()
+                await db.refresh(booking)
 
         return {
             "success": True,
@@ -332,24 +451,24 @@ class AgentBTools:
         org_id: str,
         user_id: str,
         booking_id: str,
-        new_start_time_str: str
+        new_start_time_str: str,
+        manage_transaction: bool = True,
     ) -> Dict[str, Any]:
         """
         Business Rule 4:
         If reschedule would conflict, it is REFUSED and the agent offers the nearest free alternatives!
         """
-        stmt = select(Booking).where(Booking.id == booking_id, Booking.org_id == org_id)
+        stmt = select(Booking).where(
+            Booking.id == booking_id, Booking.org_id == org_id, Booking.user_id == user_id
+        )
         res = await db.execute(stmt)
         booking = res.scalars().first()
         if not booking:
             return {"success": False, "error": f"Booking #{booking_id} not found."}
 
-        # Tenant & ownership check
-        if booking.user_id != user_id:
-            return {"success": False, "error": "Access denied: you can only reschedule your own bookings."}
-
-        if booking.status == "cancelled":
-            return {"success": False, "error": f"Booking #{booking_id} is already cancelled and cannot be rescheduled."}
+        refusal = AgentBTools._not_changeable(booking, "rescheduled")
+        if refusal:
+            return {"success": False, "error": refusal}
 
         # Fetch service details
         s_stmt = select(Service).where(Service.id == booking.service_id)
@@ -375,7 +494,8 @@ class AgentBTools:
             if not is_valid:
                 # Rule 4: Refuse and offer nearest free alternatives!
                 alternatives = await SchedulingEngine.find_nearest_alternatives(
-                    db, org_id, booking.service_id, new_start_dt, booking.practitioner_id, count=3
+                    db, org_id, booking.service_id, new_start_dt, booking.practitioner_id, count=3,
+                    customer_id=user_id, exclude_booking_id=booking.id,
                 )
                 return {
                     "success": False,
@@ -384,6 +504,7 @@ class AgentBTools:
                     "suggested_alternatives": alternatives,
                     "card": {
                         "type": "reschedule_conflict",
+                        "booking_id": booking.id,
                         "reason": reason,
                         "suggested_slots": alternatives
                     },
@@ -399,9 +520,10 @@ class AgentBTools:
             booking.status = "rescheduled"
             booking.reschedule_count = (booking.reschedule_count or 0) + 1
             booking.updated_at = datetime.datetime.utcnow()
-
-            await db.commit()
-            await db.refresh(booking)
+            await db.flush()
+            if manage_transaction:
+                await db.commit()
+                await db.refresh(booking)
 
         formatted_time = new_start_dt.strftime("%A, %B %d, %Y at %I:%M %p")
         return {
@@ -425,23 +547,24 @@ class AgentBTools:
         db: AsyncSession,
         org_id: str,
         user_id: str,
-        booking_id: str
+        booking_id: str,
+        manage_transaction: bool = True,
     ) -> Dict[str, Any]:
         """
         Cancels booking applying cancellation policy:
         Free if cancelled >= 4 hours before. Less than 4 hours incurs 50% fee.
         """
-        stmt = select(Booking).where(Booking.id == booking_id, Booking.org_id == org_id)
+        stmt = select(Booking).where(
+            Booking.id == booking_id, Booking.org_id == org_id, Booking.user_id == user_id
+        )
         res = await db.execute(stmt)
         booking = res.scalars().first()
         if not booking:
             return {"success": False, "error": f"Booking #{booking_id} not found."}
 
-        if booking.user_id != user_id:
-            return {"success": False, "error": "Access denied: you can only cancel your own bookings."}
-
-        if booking.status == "cancelled":
-            return {"success": False, "error": f"Booking #{booking_id} is already cancelled."}
+        refusal = AgentBTools._not_changeable(booking, "cancelled")
+        if refusal:
+            return {"success": False, "error": refusal}
 
         # Calculate notice hours
         # Localize start_time to Kathmandu
@@ -464,8 +587,10 @@ class AgentBTools:
         booking.status = "cancelled"
         booking.cancellation_fee = cancellation_fee
         booking.updated_at = datetime.datetime.utcnow()
-
-        await db.commit()
+        if manage_transaction:
+            await db.commit()
+        else:
+            await db.flush()
 
         return {
             "success": True,
@@ -473,8 +598,29 @@ class AgentBTools:
             "status": "cancelled",
             "hours_notice": round(hours_notice, 1),
             "cancellation_fee": cancellation_fee,
+            "card": {
+                "type": "booking_cancelled",
+                "booking_id": booking.id,
+                "service_name": service.name if service else booking.service_id,
+                "formatted_time": booking_start_ktm.strftime("%A, %B %d, %Y at %I:%M %p"),
+                "cancellation_fee": cancellation_fee,
+                "fee_note": fee_msg,
+            },
             "message": f"Appointment #{booking.id} has been cancelled. {fee_msg}"
         }
+
+    @staticmethod
+    def _not_changeable(booking: Booking, verb: str) -> Optional[str]:
+        """Reason a booking can no longer be rescheduled or cancelled, or None."""
+        if booking.status == "cancelled":
+            return f"Booking #{booking.id} is already cancelled and cannot be {verb}."
+        starts = SchedulingEngine._localize(booking.start_time)
+        if starts <= SchedulingEngine.now_kathmandu():
+            return (
+                f"Booking #{booking.id} was scheduled for {starts.strftime('%A, %b %d at %I:%M %p')}, "
+                f"which has already passed, so it cannot be {verb}."
+            )
+        return None
 
     @staticmethod
     async def list_my_bookings(
@@ -509,12 +655,181 @@ class AgentBTools:
                 "practitioner_name": prac.name if prac else b.practitioner_id,
                 "start_time": b.start_time.isoformat(),
                 "formatted_time": ktm_dt.strftime("%A, %b %d, %Y at %I:%M %p"),
+                "is_past": ktm_dt <= SchedulingEngine.now_kathmandu(),
                 "cancellation_fee": b.cancellation_fee
             })
 
         return {
             "success": True,
             "count": len(results),
-            "bookings": results
+            "timezone": "Asia/Kathmandu (UTC+05:45)",
+            "bookings": results,
+            "card": {"type": "booking_list", "title": "Your bookings", "bookings": results[:8]} if results else None,
+        }
+
+    @staticmethod
+    def cancellation_fee_for(price: float, start_time: datetime.datetime) -> Dict[str, Any]:
+        now_ktm = SchedulingEngine.now_kathmandu()
+        booking_start = start_time if start_time.tzinfo else KATHMANDU_TZ.localize(start_time)
+        hours_notice = (booking_start - now_ktm).total_seconds() / 3600.0
+        if hours_notice >= 4.0:
+            fee = 0.0
+            message = "Cancellation is free because notice is at least 4 hours."
+        else:
+            fee = round(price * 0.5, 2)
+            message = f"Less than 4 hours notice. A 50% fee of NPR {fee:.2f} applies."
+        return {"hours_notice": round(hours_notice, 1), "cancellation_fee": fee, "fee_message": message}
+
+    @staticmethod
+    async def propose_reschedule(
+        db: AsyncSession,
+        org_id: str,
+        user_id: str,
+        booking_id: str,
+        new_start_time_str: str,
+        conversation_id: Optional[str] = None,
+        commit: bool = True,
+    ) -> Dict[str, Any]:
+        booking = (await db.execute(
+            select(Booking).where(Booking.id == booking_id, Booking.org_id == org_id, Booking.user_id == user_id)
+        )).scalars().first()
+        if not booking:
+            return {"success": False, "error": f"Booking #{booking_id} not found."}
+        refusal = AgentBTools._not_changeable(booking, "rescheduled")
+        if refusal:
+            return {"success": False, "error": refusal}
+        service = (await db.execute(select(Service).where(Service.id == booking.service_id, Service.org_id == org_id))).scalars().first()
+        practitioner = (await db.execute(select(Practitioner).where(Practitioner.id == booking.practitioner_id, Practitioner.org_id == org_id))).scalars().first()
+        try:
+            new_start = SchedulingEngine.parse_datetime_kathmandu(new_start_time_str)
+        except ValueError as exc:
+            return {"success": False, "error": str(exc)}
+        is_valid, reason = await SchedulingEngine.validate_slot(
+            db, org_id, new_start, service.duration_minutes, booking.practitioner_id, user_id, exclude_booking_id=booking.id
+        )
+        if not is_valid:
+            alternatives = await SchedulingEngine.find_nearest_alternatives(
+                db, org_id, booking.service_id, new_start, booking.practitioner_id, count=3,
+                customer_id=user_id, exclude_booking_id=booking.id,
+            )
+            return {
+                "success": False,
+                "conflict": True,
+                "error": f"Reschedule refused: {reason}",
+                "suggested_alternatives": alternatives,
+                "card": {"type": "reschedule_conflict", "booking_id": booking.id, "reason": reason, "suggested_slots": alternatives},
+                "message": f"I cannot move booking #{booking_id} to that time because {reason}",
+            }
+        new_end = new_start + datetime.timedelta(minutes=service.duration_minutes)
+        proposal_id = f"prop_rs_{uuid.uuid4().hex[:8]}"
+        payload = {
+            "booking_id": booking.id,
+            "service_id": service.id,
+            "service_name": service.name,
+            "practitioner_id": practitioner.id if practitioner else booking.practitioner_id,
+            "practitioner_name": practitioner.name if practitioner else "",
+            "start_time": new_start.isoformat(),
+            "end_time": new_end.isoformat(),
+            "price": service.price,
+        }
+        summary = (
+            f"Move booking #{booking.id} to {new_start.strftime('%A, %b %d, %Y at %I:%M %p')} "
+            f"with {payload['practitioner_name']} for NPR {service.price:.2f}."
+        )
+        db.add(ActionProposal(
+            id=proposal_id,
+            org_id=org_id,
+            user_id=user_id,
+            conversation_id=conversation_id,
+            action_type="reschedule_booking",
+            payload_json=json.dumps(payload),
+            summary_text=summary,
+            status="pending",
+            expires_at=datetime.datetime.utcnow() + datetime.timedelta(minutes=30),
+        ))
+        if commit:
+            await db.commit()
+        previous = SchedulingEngine._localize(booking.start_time)
+        return {
+            "success": True,
+            "requires_confirmation": True,
+            "proposal_id": proposal_id,
+            "summary_text": summary + " Nothing is moved until you confirm.",
+            "card": {
+                "type": "booking_summary",
+                "proposal_id": proposal_id,
+                "title": f"Confirm reschedule of #{booking.id}",
+                "service_name": service.name,
+                "practitioner_name": payload["practitioner_name"],
+                "formatted_time": new_start.strftime("%A, %B %d, %Y at %I:%M %p"),
+                "previous_time": previous.strftime("%A, %B %d, %Y at %I:%M %p"),
+                "price": service.price,
+                "action": "reschedule",
+                "confirm_label": "Confirm Reschedule",
+            },
+        }
+
+    @staticmethod
+    async def propose_cancel_booking(
+        db: AsyncSession,
+        org_id: str,
+        user_id: str,
+        booking_id: str,
+        conversation_id: Optional[str] = None,
+        commit: bool = True,
+    ) -> Dict[str, Any]:
+        booking = (await db.execute(
+            select(Booking).where(Booking.id == booking_id, Booking.org_id == org_id, Booking.user_id == user_id)
+        )).scalars().first()
+        if not booking:
+            return {"success": False, "error": f"Booking #{booking_id} not found."}
+        refusal = AgentBTools._not_changeable(booking, "cancelled")
+        if refusal:
+            return {"success": False, "error": refusal}
+        service = (await db.execute(select(Service).where(Service.id == booking.service_id, Service.org_id == org_id))).scalars().first()
+        practitioner = (await db.execute(select(Practitioner).where(Practitioner.id == booking.practitioner_id, Practitioner.org_id == org_id))).scalars().first()
+        price = service.price if service else 0.0
+        fee = AgentBTools.cancellation_fee_for(price, booking.start_time)
+        proposal_id = f"prop_bc_{uuid.uuid4().hex[:8]}"
+        payload = {
+            "booking_id": booking.id,
+            "service_name": service.name if service else booking.service_id,
+            "price": price,
+            "cancellation_fee": fee["cancellation_fee"],
+            "hours_notice": fee["hours_notice"],
+            "start_time": booking.start_time.isoformat(),
+        }
+        summary = f"Cancel booking #{booking.id}. {fee['fee_message']}"
+        db.add(ActionProposal(
+            id=proposal_id,
+            org_id=org_id,
+            user_id=user_id,
+            conversation_id=conversation_id,
+            action_type="cancel_booking",
+            payload_json=json.dumps(payload),
+            summary_text=summary,
+            status="pending",
+            expires_at=datetime.datetime.utcnow() + datetime.timedelta(minutes=30),
+        ))
+        if commit:
+            await db.commit()
+        return {
+            "success": True,
+            "requires_confirmation": True,
+            "proposal_id": proposal_id,
+            "summary_text": summary,
+            "card": {
+                "type": "booking_summary",
+                "proposal_id": proposal_id,
+                "title": f"Confirm cancellation of #{booking.id}",
+                "service_name": payload["service_name"],
+                "practitioner_name": practitioner.name if practitioner else "",
+                "formatted_time": SchedulingEngine._localize(booking.start_time).strftime("%A, %B %d, %Y at %I:%M %p"),
+                "price": price,
+                "cancellation_fee": fee["cancellation_fee"],
+                "fee_note": fee["fee_message"],
+                "action": "cancel",
+                "confirm_label": "Confirm Cancellation",
+            },
         }
 

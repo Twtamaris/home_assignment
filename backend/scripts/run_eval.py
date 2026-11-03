@@ -1,8 +1,22 @@
-import sys
+"""One-command eval: runs every scenario and reports pass/fail per scenario, grouped by agent.
+
+    python scripts/run_eval.py              all scenarios, offline (mock model, BM25, throw-away database)
+    python scripts/run_eval.py -k a05       forward any pytest selection
+
+Every scenario drives the real stack (login, chat endpoint, tool loop, confirmation card, confirm endpoint)
+and then asserts on database state, not only on reply text. The tests build their own temporary database
+from the seed files and never read .env, call a model API, or touch the development database.
+The numbers printed here are counted from the results of this run.
+"""
+import os
+import re
 import subprocess
+import sys
+import tempfile
+import xml.etree.ElementTree as ET
+from collections import OrderedDict
 from pathlib import Path
 
-# Add backend directory to sys.path
 backend_dir = Path(__file__).resolve().parent.parent
 
 if sys.platform == "win32":
@@ -11,45 +25,82 @@ if sys.platform == "win32":
     except Exception:
         pass
 
-def main():
-    print("=" * 80)
-    print("  MULTI-TENANT AGENT PLATFORM - EVALUATION SUITE RUNNER")
-    print("  Testing: Agent A (Ordering), Agent B (Booking), Admin Agent & Multi-Tenant Auth")
-    print("=" * 80)
+MIN_SCENARIOS_PER_AGENT = 12
 
-    # Step 1: Ensure clean database state
-    print("\n[*] Initializing fresh test seed data...")
-    python_bin = sys.executable
-    seed_script = backend_dir / "scripts" / "seed.py"
-    seed_proc = subprocess.run([python_bin, str(seed_script)], capture_output=True, text=True)
-    if seed_proc.returncode != 0:
-        print("[!] Seed failed:\n", seed_proc.stderr)
-        sys.exit(1)
-    print("[*] Database and Knowledge Base fixtures loaded.")
+GROUPS = OrderedDict([
+    ("tests.test_eval_agent_a", ("Agent A  Himali Tea House (ordering)", True)),
+    ("tests.test_eval_agent_b", ("Agent B  Lotus Wellness Studio (booking)", True)),
+    ("tests.test_eval_admin", ("Admin analytics agent (stretch)", False)),
+    ("tests.test_tenant_isolation", ("Tenant isolation and access control", False)),
+    ("tests.test_auth", ("Auth, sessions, throttling", False)),
+    ("tests.test_confirmation_gate", ("Confirmation gate and concurrency", False)),
+    ("tests.test_third_org", ("Third organisation by configuration (stretch)", False)),
+    ("tests.test_providers", ("Chat provider adapters (Mistral, Groq, Ollama)", False)),
+])
 
-    # Step 2: Run pytest on test_eval_suite.py and test_tenant_isolation.py
-    print("\n[*] Running 43 automated eval scenarios and security isolation assertions...\n")
-    pytest_cmd = [
-        python_bin, "-m", "pytest",
-        str(backend_dir / "tests"),
-        "-v",
-        "--tb=short"
+
+def scenario_name(raw: str) -> str:
+    """test_a05_order_waits_for_confirmation -> 'a05  order waits for confirmation'"""
+    stem = re.sub(r"\[.*\]$", "", raw)
+    stem = re.sub(r"^test_", "", stem)
+    match = re.match(r"^([a-z]+\d+[a-z]?)_(.*)$", stem)
+    code, rest = (match.group(1), match.group(2)) if match else ("", stem)
+    return f"{code:<6}{rest.replace('_', ' ')}".rstrip()
+
+
+def main() -> int:
+    junit = Path(tempfile.mkdtemp(prefix="eval_report_")) / "results.xml"
+    command = [
+        sys.executable, "-m", "pytest", "tests", "-q", "--tb=short", "-W", "ignore", "-p", "no:cacheprovider",
+        f"--junitxml={junit}", *sys.argv[1:],
     ]
-    proc = subprocess.run(pytest_cmd, cwd=str(backend_dir))
+    print("=" * 88)
+    print("  EVAL SUITE  (offline: mock model, BM25 retrieval, temporary database built from the seed files)")
+    print("=" * 88)
+    proc = subprocess.run(command, cwd=str(backend_dir), env={**os.environ, "PYTHONIOENCODING": "utf-8"})
+    if not junit.exists():
+        print("[!] pytest produced no report")
+        return proc.returncode or 1
 
-    print("\n" + "=" * 80)
-    if proc.returncode == 0:
-        print("  ALL SCENARIOS PASSED (100% SUCCESS RATE - 43/43 TESTS)")
-        print("  - Agent A (Himali Tea House): 16 Scenarios Verified (Atomic stock, orders, concurrent exhaustion, proposal gate)")
-        print("  - Agent B (Lotus Wellness Studio): 16 Scenarios Verified (Kathmandu slots, holidays, concurrent double-booking mutex)")
-        print("  - Admin Analytics Agent: 3 Scenarios Verified (Read-only metrics, conversation attribution, 403 RBAC)")
-        print("  - Tenant Isolation & Security: 8 Security Tests Verified (Privilege escalation blocked, cross-tenant isolation, rate limiting)")
-    else:
-        print(f"  [!] Evaluation suite reported failures (Exit code {proc.returncode})")
-    print("=" * 80)
+    scenarios = {key: OrderedDict() for key in GROUPS}
+    for case in ET.parse(junit).getroot().iter("testcase"):
+        module = case.get("classname", "")
+        if module not in scenarios:
+            continue
+        name = scenario_name(case.get("name", ""))
+        failed = case.find("failure") is not None or case.find("error") is not None
+        skipped = case.find("skipped") is not None
+        prior = scenarios[module].get(name, "PASS")
+        scenarios[module][name] = "FAIL" if failed or prior == "FAIL" else ("SKIP" if skipped else "PASS")
 
-    sys.exit(proc.returncode)
+    print("\n" + "=" * 88)
+    print("  RESULTS PER SCENARIO")
+    print("=" * 88)
+    total = passed = 0
+    shortfall = []
+    for module, (title, per_agent) in GROUPS.items():
+        results = scenarios[module]
+        if not results:
+            continue
+        ok = sum(1 for status in results.values() if status == "PASS")
+        total += len(results)
+        passed += ok
+        print(f"\n{title}: {ok}/{len(results)} passed")
+        for name, status in results.items():
+            print(f"  {'PASS' if status == 'PASS' else status}  {name}")
+        if per_agent and len(results) < MIN_SCENARIOS_PER_AGENT:
+            shortfall.append(title)
+
+    print("\n" + "=" * 88)
+    verdict = "ALL SCENARIOS PASSED" if proc.returncode == 0 and passed == total else "FAILURES PRESENT"
+    print(f"  {verdict}: {passed}/{total} scenarios passed")
+    if shortfall:
+        print(f"  [!] fewer than {MIN_SCENARIOS_PER_AGENT} scenarios for: {', '.join(shortfall)}")
+    print("  Offline run: LLM_PROVIDER=mock (a deterministic stand-in, not a language model), EMBEDDING_PROVIDER=bm25.")
+    print("  Run `python scripts/live_eval.py` for the same checks against the real model.")
+    print("=" * 88)
+    return proc.returncode or (1 if shortfall else 0)
+
 
 if __name__ == "__main__":
-    main()
-
+    sys.exit(main())

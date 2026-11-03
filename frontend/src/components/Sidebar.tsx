@@ -33,6 +33,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
 }) => {
   const [editingId, setEditingId] = useState<string | null>(null)
   const [editTitle, setEditTitle] = useState('')
+  const [confirmingId, setConfirmingId] = useState<string | null>(null)
 
   const startEditing = (conv: Conversation, e: React.MouseEvent) => {
     e.stopPropagation()
@@ -80,7 +81,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
                     : 'text-slate-400 hover:text-white'
                 }`}
               >
-                Store Chat
+                Customer view
               </button>
               <button
                 onClick={() => onToggleChatMode('admin')}
@@ -147,7 +148,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
                   </div>
 
                   {/* Rename / Delete Actions */}
-                  <div className="flex items-center gap-1 opacity-0 group-hover:opacity-100 transition shrink-0">
+                  <div className="flex items-center gap-1 lg:opacity-0 lg:group-hover:opacity-100 focus-within:opacity-100 transition shrink-0">
                     {isEditing ? (
                       <>
                         <button
@@ -168,20 +169,29 @@ export const Sidebar: React.FC<SidebarProps> = ({
                         <button
                           onClick={(e) => startEditing(conv, e)}
                           className="p-1 rounded text-slate-400 hover:text-white hover:bg-slate-700"
-                          title="Rename"
+                          title="Rename" aria-label={`Rename ${conv.title}`}
                         >
                           <Edit2 className="w-3 h-3" />
                         </button>
-                        <button
-                          onClick={(e) => {
-                            e.stopPropagation()
-                            onDeleteChat(conv.id)
-                          }}
-                          className="p-1 rounded text-slate-400 hover:text-rose-400 hover:bg-slate-700"
-                          title="Delete"
-                        >
-                          <Trash2 className="w-3 h-3" />
-                        </button>
+                        {confirmingId === conv.id ? (
+                          <button
+                            onClick={(e) => { e.stopPropagation(); setConfirmingId(null); onDeleteChat(conv.id) }}
+                            onBlur={() => setConfirmingId(null)}
+                            autoFocus
+                            className="px-1.5 py-0.5 rounded text-[10px] font-semibold bg-rose-600 text-white"
+                            title="Click again to delete this chat"
+                          >
+                            Delete?
+                          </button>
+                        ) : (
+                          <button
+                            onClick={(e) => { e.stopPropagation(); setConfirmingId(conv.id) }}
+                            className="p-1 rounded text-slate-400 hover:text-rose-400 hover:bg-slate-700"
+                            title="Delete" aria-label={`Delete ${conv.title}`}
+                          >
+                            <Trash2 className="w-3 h-3" />
+                          </button>
+                        )}
                       </>
                     )}
                   </div>

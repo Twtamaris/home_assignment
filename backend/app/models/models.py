@@ -19,6 +19,8 @@ class Organisation(Base):
     agent_name = Column(String(50), default="Assistant")
     agent_role = Column(String(100), default="Agent")
     greeting = Column(Text, nullable=True)
+    # retail = ordering agent, studio = booking agent. Only these two kinds exist.
+    agent_kind = Column(String(20), nullable=False, default="retail")
     created_at = Column(DateTime, default=datetime.datetime.utcnow)
 
     users = relationship("User", back_populates="organisation", cascade="all, delete-orphan")
@@ -303,3 +305,11 @@ class InventoryEvent(Base):
     product = relationship("Product")
 
 
+class RevokedToken(Base):
+    """Access tokens that were signed out before they expired. Checked on every request."""
+    __tablename__ = "revoked_tokens"
+
+    jti = Column(String(64), primary_key=True)
+    user_id = Column(String(50), nullable=False, index=True)
+    expires_at = Column(DateTime, nullable=False, index=True)
+    revoked_at = Column(DateTime, default=datetime.datetime.utcnow)

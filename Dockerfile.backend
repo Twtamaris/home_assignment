@@ -4,7 +4,7 @@ WORKDIR /app
 
 ENV PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
-    PYTHONPATH=/app
+    PYTHONPATH=/app/backend
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential \
@@ -15,10 +15,11 @@ COPY backend/requirements.txt /app/requirements.txt
 RUN pip install --no-cache-dir -r requirements.txt
 
 COPY backend /app/backend
-COPY requirement /app/requirement
+RUN mkdir -p /app/backend/data
 
 WORKDIR /app/backend
+EXPOSE 8000
 
-# Seed database and start uvicorn
-CMD python scripts/seed.py && uvicorn app.main:app --host 0.0.0.0 --port 8000
-
+# Seed only when the database is empty, so restarting the container keeps users, orders and bookings.
+# `python scripts/seed.py` (without the flag) rebuilds everything from the seed files.
+CMD ["sh", "-c", "python scripts/seed.py --if-missing && uvicorn app.main:app --host 0.0.0.0 --port 8000"]

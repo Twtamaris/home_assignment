@@ -21,7 +21,7 @@ async def list_products(
     if category:
         stmt = stmt.where(Product.category == category)
     res = await db.execute(stmt)
-    return [ProductOut.from_orm(p) for p in res.scalars().all()]
+    return [ProductOut.model_validate(p) for p in res.scalars().all()]
 
 @router.get("", response_model=List[OrderOut])
 async def list_orders(
@@ -78,38 +78,16 @@ async def get_order(
         updated_at=order.updated_at
     )
 
+_GATE = "Create a proposal in chat, then POST /api/actions/proposals/{proposal_id}/confirm."
+
+
 @router.post("", response_model=OrderOut)
 async def create_order_endpoint(
     payload: OrderCreate,
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user)
 ):
-    items_dict = [{"sku": i.sku, "quantity": i.quantity} for i in payload.items]
-    res = await AgentATools.create_order(
-        db, current_user.org_id, current_user.id, items_dict, payload.shipping_address
-    )
-    if not res.get("success"):
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail=res.get("message") or res.get("error")
-        )
-
-    order_id = res["order_id"]
-    order_stmt = select(Order).where(Order.id == order_id)
-    o_res = await db.execute(order_stmt)
-    order = o_res.scalars().first()
-
-    return OrderOut(
-        id=order.id,
-        org_id=order.org_id,
-        user_id=order.user_id,
-        status=order.status,
-        items=order.items,
-        total_price=order.total_price,
-        shipping_address=order.shipping_address,
-        created_at=order.created_at,
-        updated_at=order.updated_at
-    )
+    raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=_GATE)
 
 @router.patch("/{order_id}", response_model=OrderOut)
 async def update_order_endpoint(
@@ -118,31 +96,7 @@ async def update_order_endpoint(
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user)
 ):
-    items_dict = [{"sku": i.sku, "quantity": i.quantity} for i in payload.items] if payload.items else None
-    res = await AgentATools.update_order(
-        db, current_user.org_id, current_user.id, order_id, items_dict, payload.shipping_address
-    )
-    if not res.get("success"):
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail=res.get("error") or res.get("message")
-        )
-
-    order_stmt = select(Order).where(Order.id == order_id)
-    o_res = await db.execute(order_stmt)
-    order = o_res.scalars().first()
-
-    return OrderOut(
-        id=order.id,
-        org_id=order.org_id,
-        user_id=order.user_id,
-        status=order.status,
-        items=order.items,
-        total_price=order.total_price,
-        shipping_address=order.shipping_address,
-        created_at=order.created_at,
-        updated_at=order.updated_at
-    )
+    raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=_GATE)
 
 @router.post("/{order_id}/cancel")
 async def cancel_order_endpoint(
@@ -150,11 +104,5 @@ async def cancel_order_endpoint(
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user)
 ):
-    res = await AgentATools.cancel_order(db, current_user.org_id, current_user.id, order_id)
-    if not res.get("success"):
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail=res.get("error")
-        )
-    return res
+    raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=_GATE)
 

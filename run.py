@@ -5,7 +5,9 @@ Provides equivalent functionality to Makefile for environments without `make`.
 Usage:
   python run.py seed
   python run.py eval
+  python run.py live-eval
   python run.py test
+  python run.py add-org
   python run.py advance-order <ORDER_ID> <STATUS>
   python run.py backend
   python run.py frontend
@@ -40,8 +42,12 @@ def main():
         sys.exit(subprocess.run([py, str(BACKEND_DIR / "scripts" / "seed.py")]).returncode)
     elif cmd == "eval":
         sys.exit(subprocess.run([py, str(BACKEND_DIR / "scripts" / "run_eval.py")]).returncode)
+    elif cmd == "live-eval":
+        sys.exit(subprocess.run([py, str(BACKEND_DIR / "scripts" / "live_eval.py")]).returncode)
+    elif cmd == "add-org":
+        sys.exit(subprocess.run([py, str(BACKEND_DIR / "scripts" / "add_third_org.py")]).returncode)
     elif cmd == "test":
-        sys.exit(subprocess.run([py, "-m", "pytest", str(BACKEND_DIR / "tests" / "test_tenant_isolation.py"), "-v"]).returncode)
+        sys.exit(subprocess.run([py, "-m", "pytest", str(BACKEND_DIR / "tests"), "-q"]).returncode)
     elif cmd == "advance-order":
         if len(sys.argv) < 4:
             print("Usage: python run.py advance-order <ORDER_ID> <confirmed|shipped|delivered|cancelled>")

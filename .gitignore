@@ -37,6 +37,7 @@ dist/
 *.log
 
 # Databases & Runtime Local Files
+backend/chroma_data/
 *.db
 *.sqlite3
 platform.db
@@ -46,6 +47,13 @@ data/
 .env
 !.env.example
 
+# SQLite sidecar files, container data and browser-check screenshots
+*.db-shm
+*.db-wal
+*.db-journal
+backend/data/
+frontend/e2e/shots/
+
 # IDE
 .idea/
 .vscode/
@@ -53,3 +61,9 @@ data/
 *.swo
 .DS_Store
 
+
+# SQLite sidecar files and container data
+*.db-shm
+*.db-wal
+*.db-journal
+backend/data/

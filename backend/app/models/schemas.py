@@ -19,10 +19,18 @@ class UserLogin(BaseModel):
 
 class UserRegister(BaseModel):
     email: str
-    password: str
-    name: str
+    password: str = Field(min_length=8, max_length=128)
+    name: str = Field(min_length=1, max_length=100)
     org_id: str
-    role: Optional[str] = "customer"
+    role: Optional[str] = "customer"  # accepted but ignored: public sign-up is always a customer
+
+    @field_validator("name")
+    @classmethod
+    def strip_name(cls, v: str) -> str:
+        v = v.strip()
+        if not v:
+            raise ValueError("Name is required")
+        return v
 
     @field_validator("email")
     @classmethod
@@ -60,6 +68,7 @@ class OrgOut(BaseModel):
     agent_name: str
     agent_role: str
     greeting: Optional[str] = None
+    agent_kind: str = "retail"
 
     class Config:
         from_attributes = True

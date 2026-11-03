@@ -30,7 +30,7 @@ async def list_conversations(
         Conversation.agent_type == agent_type
     ).order_by(desc(Conversation.updated_at))
     res = await db.execute(stmt)
-    return [ConversationOut.from_orm(c) for c in res.scalars().all()]
+    return [ConversationOut.model_validate(c) for c in res.scalars().all()]
 
 @router.post("/conversations", response_model=ConversationOut)
 async def create_conversation(
@@ -55,7 +55,7 @@ async def create_conversation(
     db.add(conv)
     await db.commit()
     await db.refresh(conv)
-    return ConversationOut.from_orm(conv)
+    return ConversationOut.model_validate(conv)
 
 @router.patch("/conversations/{conv_id}", response_model=ConversationOut)
 async def rename_conversation(
@@ -80,7 +80,7 @@ async def rename_conversation(
     conv.updated_at = datetime.datetime.utcnow()
     await db.commit()
     await db.refresh(conv)
-    return ConversationOut.from_orm(conv)
+    return ConversationOut.model_validate(conv)
 
 @router.delete("/conversations/{conv_id}")
 async def delete_conversation(

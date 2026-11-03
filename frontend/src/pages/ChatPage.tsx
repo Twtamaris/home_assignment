@@ -1,7 +1,7 @@
-import React, { useState, useEffect, useRef } from 'react'
+import React, { useState, useEffect, useRef, useCallback } from 'react'
 import { useAuth } from '../context/AuthContext'
-import { Organisation, User, Conversation, Message, Citation } from '../types'
-import { api } from '../api'
+import { Organisation, User, Conversation, Message, Citation, ProposalState } from '../types'
+import { api, ApiError, authFetch, extractErrorMessage } from '../api'
 import { Navbar } from '../components/Navbar'
 import { Sidebar } from '../components/Sidebar'
 import { MessageThread } from '../components/MessageThread'
@@ -19,67 +19,110 @@ export const ChatPage: React.FC<ChatPageProps> = ({ user, org }) => {
   const [conversations, setConversations] = useState<Conversation[]>([])
   const [activeConvId, setActiveConvId] = useState<string | null>(null)
   const [messages, setMessages] = useState<Message[]>([])
-  const [chatMode, setChatMode] = useState<'customer' | 'admin'>('customer')
+  const [loadingMessages, setLoadingMessages] = useState(false)
+  const [loadError, setLoadError] = useState<string | null>(null)
+  const [chatMode, setChatMode] = useState<'customer' | 'admin'>(user.role === 'admin' ? 'admin' : 'customer')  // staff land in their analytics chat
 
-  // Streaming State
+  // Streaming
   const [isStreaming, setIsStreaming] = useState(false)
   const [streamingContent, setStreamingContent] = useState('')
   const [activeToolMessage, setActiveToolMessage] = useState<string | null>(null)
   const abortControllerRef = useRef<AbortController | null>(null)
+  const streamedRef = useRef('')
 
-  // Modals & Drawers
+  // Confirmation cards
+  const [proposals, setProposals] = useState<Record<string, ProposalState>>({})
+  const [busyProposalId, setBusyProposalId] = useState<string | null>(null)
+  const requestedProposals = useRef<Set<string>>(new Set())
+  const [panelRefresh, setPanelRefresh] = useState(0)
+
+  // Panels
   const [isDrawerOpen, setIsDrawerOpen] = useState(false)
   const [isAdminModalOpen, setIsAdminModalOpen] = useState(false)
   const [selectedCitation, setSelectedCitation] = useState<Citation | null>(null)
   const [isSidebarOpen, setIsSidebarOpen] = useState(false)
 
-  useEffect(() => {
-    loadConversations()
-  }, [chatMode, org.id])
+  const activeConvRef = useRef<string | null>(null)
+  activeConvRef.current = activeConvId
 
-  useEffect(() => {
-    if (activeConvId) {
-      loadMessages(activeConvId)
-    } else {
-      setMessages([])
+  // ---- conversations ------------------------------------------------------------------------------
+  const refreshConversations = useCallback(async () => {
+    try {
+      setConversations(await api.listConversations(chatMode))
+    } catch (err) {
+      console.error(err)
     }
-  }, [activeConvId])
+  }, [chatMode])
 
-  const loadConversations = async () => {
+  const loadConversations = useCallback(async () => {
     try {
       const convs = await api.listConversations(chatMode)
       setConversations(convs)
       if (convs.length > 0) {
-        if (!activeConvId || !convs.find((c) => c.id === activeConvId)) {
-          setActiveConvId(convs[0].id)
-        }
+        setActiveConvId((current) => (current && convs.find((c) => c.id === current) ? current : convs[0].id))
       } else {
-        // Automatically create a default conversation
-        const title = chatMode === 'admin' ? 'Store Performance Review' : 'New Inquiries'
-        const newConv = await api.createConversation(title, chatMode)
-        setConversations([newConv])
-        setActiveConvId(newConv.id)
+        const title = chatMode === 'admin' ? 'Analytics' : 'New Chat'
+        const fresh = await api.createConversation(title, chatMode)
+        setConversations([fresh])
+        setActiveConvId(fresh.id)
       }
-    } catch (err) {
-      console.error(err)
+    } catch (err: any) {
+      setLoadError(extractErrorMessage(err, 'Could not load your conversations.'))
     }
-  }
+  }, [chatMode])
 
-  const loadMessages = async (convId: string) => {
+  useEffect(() => {
+    loadConversations()
+  }, [loadConversations, org.id])
+
+  // ---- messages and the state of the cards in them --------------------------------------------------
+  const hydrateProposals = useCallback((list: Message[]) => {
+    const ids = list.map((m) => m.card?.proposal_id).filter((id): id is string => !!id && !requestedProposals.current.has(id))
+    ids.forEach((id) => {
+      requestedProposals.current.add(id)
+      api.getProposal(id)
+        .then((state) => setProposals((prev) => ({ ...prev, [id]: state })))
+        .catch(() => setProposals((prev) => ({ ...prev, [id]: { status: 'failed' } })))
+    })
+  }, [])
+
+  const loadMessages = useCallback(async (convId: string, quiet = false) => {
+    if (!quiet) {
+      setLoadingMessages(true)
+      setLoadError(null)
+    }
     try {
       const msgs = await api.getMessages(convId)
+      if (activeConvRef.current !== convId) return
       setMessages(msgs)
-    } catch (err) {
-      console.error(err)
+      hydrateProposals(msgs)
+    } catch (err: any) {
+      if (!quiet) setLoadError(extractErrorMessage(err, 'Could not load this conversation.'))
+    } finally {
+      if (!quiet) setLoadingMessages(false)
+    }
+  }, [hydrateProposals])
+
+  useEffect(() => {
+    if (activeConvId) loadMessages(activeConvId)
+    else setMessages([])
+  }, [activeConvId, loadMessages])
+
+  const markProposal = async (id: string) => {
+    try {
+      const state = await api.getProposal(id)
+      setProposals((prev) => ({ ...prev, [id]: state }))
+    } catch {
+      /* the next reload will show it */
     }
   }
 
+  // ---- sidebar actions -------------------------------------------------------------------------------
   const handleNewChat = async (mode: 'customer' | 'admin' = chatMode) => {
     try {
-      const title = mode === 'admin' ? 'New Analytics Inquiry' : 'New Conversation'
-      const newConv = await api.createConversation(title, mode)
-      setConversations([newConv, ...conversations])
-      setActiveConvId(newConv.id)
+      const fresh = await api.createConversation(mode === 'admin' ? 'Analytics' : 'New Chat', mode)
+      setConversations((prev) => [fresh, ...prev])
+      setActiveConvId(fresh.id)
       setMessages([])
       setIsSidebarOpen(false)
     } catch (err) {
@@ -90,7 +133,7 @@ export const ChatPage: React.FC<ChatPageProps> = ({ user, org }) => {
   const handleRenameChat = async (id: string, newTitle: string) => {
     try {
       const updated = await api.renameConversation(id, newTitle)
-      setConversations(conversations.map((c) => (c.id === id ? updated : c)))
+      setConversations((prev) => prev.map((c) => (c.id === id ? updated : c)))
     } catch (err) {
       console.error(err)
     }
@@ -101,9 +144,8 @@ export const ChatPage: React.FC<ChatPageProps> = ({ user, org }) => {
       await api.deleteConversation(id)
       const remaining = conversations.filter((c) => c.id !== id)
       setConversations(remaining)
-      if (activeConvId === id) {
-        setActiveConvId(remaining.length > 0 ? remaining[0].id : null)
-      }
+      if (activeConvId === id) setActiveConvId(remaining.length > 0 ? remaining[0].id : null)
+      if (remaining.length === 0) loadConversations()
     } catch (err) {
       console.error(err)
     }
@@ -112,128 +154,73 @@ export const ChatPage: React.FC<ChatPageProps> = ({ user, org }) => {
   const handleToggleChatMode = (mode: 'customer' | 'admin') => {
     setChatMode(mode)
     setActiveConvId(null)
+    setMessages([])
   }
 
-  // --- Real-time SSE Chat Streaming ---
+  // ---- streaming a reply ------------------------------------------------------------------------------
   const handleSendMessage = async (text: string) => {
     if (!text.trim() || isStreaming) return
 
-    let currentConvId = activeConvId
-    if (!currentConvId) {
-      const newConv = await api.createConversation('New Chat', chatMode)
-      setConversations([newConv, ...conversations])
-      setActiveConvId(newConv.id)
-      currentConvId = newConv.id
+    let convId = activeConvId
+    if (!convId) {
+      const fresh = await api.createConversation('New Chat', chatMode)
+      setConversations((prev) => [fresh, ...prev])
+      setActiveConvId(fresh.id)
+      activeConvRef.current = fresh.id
+      convId = fresh.id
     }
+    const thisConv = convId
 
-    // Append optimistic user message
-    const userMsg: Message = {
-      id: `client_${Date.now()}`,
-      conversation_id: currentConvId,
-      sender: 'user',
-      content: text,
-      created_at: new Date().toISOString(),
-    }
-    setMessages((prev) => [...prev, userMsg])
-
-    // Prepare streaming
+    setMessages((prev) => [...prev, { id: `client_${Date.now()}`, conversation_id: thisConv, sender: 'user', content: text, created_at: new Date().toISOString() }])
     setIsStreaming(true)
     setStreamingContent('')
     setActiveToolMessage(null)
+    streamedRef.current = ''
 
     const controller = new AbortController()
     abortControllerRef.current = controller
-
-    const token = localStorage.getItem('auth_token')
-    let streamText = ''
-    let receivedCard: any = null
-    let receivedCitations: Citation[] = []
-    let receivedTools: any[] = []
+    let aborted = false
 
     try {
-      const response = await fetch(`/api/chat/conversations/${currentConvId}/messages`, {
+      const response = await authFetch(`/chat/conversations/${thisConv}/messages`, {
         method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          Authorization: `Bearer ${token}`,
-        },
+        headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ content: text }),
         signal: controller.signal,
       })
-
       if (!response.ok) {
-        const err = await response.json().catch(() => ({ detail: 'Request failed' }))
-        throw new Error(err.detail || `Server returned ${response.status}`)
+        const err = await response.json().catch(() => ({ detail: `Request failed (${response.status})` }))
+        throw new Error(extractErrorMessage(err, `Request failed (${response.status})`))
       }
 
       const reader = response.body?.getReader()
       const decoder = new TextDecoder()
       let buffer = ''
-
-      if (reader) {
-        while (true) {
-          const { done, value } = await reader.read()
-          if (done) break
-
-          buffer += decoder.decode(value, { stream: true })
-          const lines = buffer.split('\n\n')
-          buffer = lines.pop() || ''
-
-          for (const block of lines) {
-            const trimmed = block.trim()
-            if (!trimmed) continue
-
-            const eventMatch = trimmed.match(/^event:\s*(\w+)/m)
-            const dataMatch = trimmed.match(/^data:\s*(.*)/m)
-
-            if (!eventMatch || !dataMatch) continue
-            const eventType = eventMatch[1]
-            let payload: any = {}
-            try {
-              payload = JSON.parse(dataMatch[1])
-            } catch {
-              payload = dataMatch[1]
-            }
-
-            if (eventType === 'tool_start') {
-              setActiveToolMessage(payload.message || 'Executing tool...')
-              receivedTools.push({ tool: payload.tool, status: 'running' })
-            } else if (eventType === 'tool_end') {
-              setActiveToolMessage(null)
-            } else if (eventType === 'token') {
-              streamText += payload.token
-              setStreamingContent((prev) => prev + payload.token)
-            } else if (eventType === 'done') {
-              if (payload.card) receivedCard = payload.card
-              if (payload.citations) receivedCitations = payload.citations
-              if (payload.content) streamText = payload.content
-            }
+      while (reader) {
+        const { done, value } = await reader.read()
+        if (done) break
+        buffer += decoder.decode(value, { stream: true })
+        const blocks = buffer.split('\n\n')
+        buffer = blocks.pop() || ''
+        for (const block of blocks) {
+          const event = block.match(/^event:\s*(\w+)/m)?.[1]
+          const data = block.match(/^data:\s*(.*)/m)?.[1]
+          if (!event || data === undefined) continue
+          let payload: any = {}
+          try { payload = JSON.parse(data) } catch { payload = {} }
+          if (event === 'tool_start') setActiveToolMessage(payload.message || 'Working...')
+          else if (event === 'tool_end') setActiveToolMessage(null)
+          else if (event === 'token') {
+            streamedRef.current += payload.token
+            setStreamingContent(streamedRef.current)
           }
         }
       }
-
-      // Add finalized agent message
-      const agentMsg: Message = {
-        id: `agent_${Date.now()}`,
-        conversation_id: currentConvId,
-        sender: 'agent',
-        content: streamText,
-        card: receivedCard,
-        citations: receivedCitations,
-        tool_calls: receivedTools,
-        created_at: new Date().toISOString(),
-      }
-      setMessages((prev) => [...prev, agentMsg])
     } catch (err: any) {
-      if (err.name !== 'AbortError') {
-        const errorMsg: Message = {
-          id: `err_${Date.now()}`,
-          conversation_id: currentConvId,
-          sender: 'system',
-          content: `⚠️ Error: ${err.message}`,
-          created_at: new Date().toISOString(),
-        }
-        setMessages((prev) => [...prev, errorMsg])
+      if (err.name === 'AbortError') {
+        aborted = true
+      } else if (activeConvRef.current === thisConv) {
+        setMessages((prev) => [...prev, { id: `err_${Date.now()}`, conversation_id: thisConv, sender: 'system', content: err.message || 'Something went wrong.', created_at: new Date().toISOString() }])
       }
     } finally {
       setIsStreaming(false)
@@ -241,53 +228,79 @@ export const ChatPage: React.FC<ChatPageProps> = ({ user, org }) => {
       setActiveToolMessage(null)
       abortControllerRef.current = null
     }
+
+    if (!aborted) {
+      // The server saved the reply, its card and its citations. Show exactly what was saved, then pick up a new title.
+      await loadMessages(thisConv, true)
+      refreshConversations()
+    }
   }
 
   const handleStopStreaming = () => {
-    if (abortControllerRef.current) {
-      abortControllerRef.current.abort()
-      setIsStreaming(false)
-      if (streamingContent) {
-        setMessages((prev) => [
-          ...prev,
-          {
-            id: `stopped_${Date.now()}`,
-            conversation_id: activeConvId || 'conv',
-            sender: 'agent',
-            content: `${streamingContent} *(Response stopped)*`,
-            created_at: new Date().toISOString(),
-          },
-        ])
+    const partial = streamedRef.current
+    abortControllerRef.current?.abort()
+    setIsStreaming(false)
+    setStreamingContent('')
+    setActiveToolMessage(null)
+    if (partial && activeConvRef.current) {
+      setMessages((prev) => [...prev, { id: `stopped_${Date.now()}`, conversation_id: activeConvRef.current as string, sender: 'agent', content: `${partial}\n\n*(stopped)*`, created_at: new Date().toISOString() }])
+    }
+  }
+
+  // ---- confirmation cards ---------------------------------------------------------------------------------
+  const settle = async (proposalId: string) => {
+    await markProposal(proposalId)
+    if (activeConvRef.current) await loadMessages(activeConvRef.current, true)
+    setPanelRefresh((n) => n + 1)
+  }
+
+  const handleConfirmProposal = async (proposalId: string) => {
+    setBusyProposalId(proposalId)
+    try {
+      await api.confirmProposal(proposalId)
+    } catch (err: any) {
+      // A 409 means the world changed (slot taken, stock gone). The server already wrote the explanation into the thread.
+      if (!(err instanceof ApiError && err.status === 409) && activeConvRef.current) {
+        setMessages((prev) => [...prev, { id: `confirm_err_${Date.now()}`, conversation_id: activeConvRef.current as string, sender: 'system', content: err.message || 'Could not confirm.', created_at: new Date().toISOString() }])
       }
-      setStreamingContent('')
-      setActiveToolMessage(null)
+    } finally {
+      await settle(proposalId)
+      setBusyProposalId(null)
+    }
+  }
+
+  const handleRejectProposal = async (proposalId: string) => {
+    setBusyProposalId(proposalId)
+    try {
+      await api.rejectProposal(proposalId)
+    } catch (err: any) {
+      if (activeConvRef.current) {
+        setMessages((prev) => [...prev, { id: `reject_err_${Date.now()}`, conversation_id: activeConvRef.current as string, sender: 'system', content: err.message || 'Could not discard.', created_at: new Date().toISOString() }])
+      }
+    } finally {
+      await settle(proposalId)
+      setBusyProposalId(null)
     }
   }
 
   return (
-    <div className="flex flex-col h-screen bg-slate-950 text-slate-100 overflow-hidden font-sans">
-      {/* Top Navbar */}
+    <div className="flex flex-col h-dvh bg-slate-950 text-slate-100 overflow-hidden font-sans">
       <Navbar
         org={org}
         user={user}
         onOpenDrawer={() => setIsDrawerOpen(true)}
         onOpenAdminModal={() => setIsAdminModalOpen(true)}
         onToggleSidebar={() => setIsSidebarOpen(!isSidebarOpen)}
-        onLogout={logout}
+        onLogout={() => logout()}
       />
 
-      {/* Main Body */}
-      <div className="flex-1 flex overflow-hidden">
-        {/* Sidebar */}
+      <div className="flex-1 flex overflow-hidden min-h-0">
         <Sidebar
           isOpen={isSidebarOpen}
           onClose={() => setIsSidebarOpen(false)}
           conversations={conversations}
           activeConvId={activeConvId}
-          onSelectConversation={(id) => {
-            setActiveConvId(id)
-            setIsSidebarOpen(false)
-          }}
+          onSelectConversation={(id) => { setActiveConvId(id); setIsSidebarOpen(false) }}
           onNewChat={handleNewChat}
           onRenameChat={handleRenameChat}
           onDeleteChat={handleDeleteChat}
@@ -297,41 +310,29 @@ export const ChatPage: React.FC<ChatPageProps> = ({ user, org }) => {
           onToggleChatMode={handleToggleChatMode}
         />
 
-        {/* Chat Thread */}
         <MessageThread
           messages={messages}
           streamingContent={streamingContent}
           activeToolMessage={activeToolMessage}
           isStreaming={isStreaming}
+          loading={loadingMessages}
+          loadError={loadError}
+          onRetryLoad={() => (activeConvId ? loadMessages(activeConvId) : loadConversations())}
+          proposals={proposals}
+          busyProposalId={busyProposalId}
           onSendMessage={handleSendMessage}
+          onConfirmProposal={handleConfirmProposal}
+          onRejectProposal={handleRejectProposal}
           onStopStreaming={handleStopStreaming}
-          onSelectCitation={(citation) => setSelectedCitation(citation)}
+          onSelectCitation={setSelectedCitation}
           org={org}
           chatMode={chatMode}
         />
       </div>
 
-      {/* Customer Drawer (Orders/Bookings) */}
-      <CustomerDrawer
-        isOpen={isDrawerOpen}
-        onClose={() => setIsDrawerOpen(false)}
-        user={user}
-        org={org}
-      />
-
-      {/* Citation Source Modal */}
-      <CitationModal
-        citation={selectedCitation}
-        onClose={() => setSelectedCitation(null)}
-      />
-
-      {/* Admin Analytics Modal */}
-      <AdminAnalyticsModal
-        isOpen={isAdminModalOpen}
-        onClose={() => setIsAdminModalOpen(false)}
-        org={org}
-      />
+      <CustomerDrawer isOpen={isDrawerOpen} onClose={() => setIsDrawerOpen(false)} user={user} org={org} refreshKey={panelRefresh} />
+      <CitationModal citation={selectedCitation} onClose={() => setSelectedCitation(null)} />
+      <AdminAnalyticsModal isOpen={isAdminModalOpen} onClose={() => setIsAdminModalOpen(false)} org={org} />
     </div>
   )
 }
-

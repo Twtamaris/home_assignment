@@ -1,12 +1,35 @@
 import datetime
 import asyncio
+import re
 from typing import List, Dict, Any, Optional, Tuple
 import pytz
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select, and_, or_
+from sqlalchemy import select
 from app.models.models import Booking, Service, Practitioner, Holiday, WeeklyOpeningHours
 
 KATHMANDU_TZ = pytz.timezone("Asia/Kathmandu")
+
+_WEEKDAYS = ["monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday"]
+_ACTIVE_STATUSES = ["confirmed", "rescheduled"]
+SLOT_STEP_MINUTES = 30
+
+# Used only when an organisation has no weekly_opening_hours rows at all.
+_DEFAULT_HOURS = {
+    "Monday": {"open": "08:00", "close": "19:00"},
+    "Tuesday": {"open": "08:00", "close": "19:00"},
+    "Wednesday": {"open": "08:00", "close": "19:00"},
+    "Thursday": {"open": "08:00", "close": "19:00"},
+    "Friday": {"open": "08:00", "close": "19:00"},
+    "Saturday": {"open": "09:00", "close": "18:00"},
+    "Sunday": {"open": "10:00", "close": "16:00"},
+}
+
+PARTS_OF_DAY = {
+    "morning": (0, 12),
+    "afternoon": (12, 17),
+    "evening": (17, 24),
+}
+
 
 class SchedulingEngine:
     """
@@ -25,72 +48,102 @@ class SchedulingEngine:
     ) -> datetime.datetime:
         """
         Rule 6: Resolves natural language relative dates e.g. 'next Tuesday afternoon', 'tomorrow morning'
-        anchored to Asia/Kathmandu (UTC+05:45).
+        anchored to Asia/Kathmandu (UTC+05:45). Raises ValueError when no date is recognised.
         """
         now = ref_dt or cls.now_kathmandu()
         text = expr.lower().strip()
+        today = now.date()
 
-        target_date = now.date()
-        if "tomorrow" in text:
-            target_date = now.date() + datetime.timedelta(days=1)
-        elif "today" in text:
-            target_date = now.date()
+        target_date = None
+        if re.search(r"\bday after tomorrow\b", text):
+            target_date = today + datetime.timedelta(days=2)
+        elif re.search(r"\b(tomorrow|tmrw)\b", text):
+            target_date = today + datetime.timedelta(days=1)
+        elif re.search(r"\b(today|tonight)\b", text):
+            target_date = today
         else:
-            weekdays = ["monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday"]
-            for i, day in enumerate(weekdays):
-                if day in text:
-                    current_wd = now.weekday()
-                    days_ahead = (i - current_wd) % 7
-                    if days_ahead == 0:
-                        days_ahead = 7
-                    target_date = now.date() + datetime.timedelta(days=days_ahead)
-                    break
+            in_days = re.search(r"\bin (\d{1,2}) days?\b", text)
+            if in_days:
+                target_date = today + datetime.timedelta(days=int(in_days.group(1)))
+            else:
+                for index, day in enumerate(_WEEKDAYS):
+                    if re.search(rf"\b{day}\b", text):
+                        days_ahead = (index - now.weekday()) % 7
+                        if days_ahead == 0:
+                            days_ahead = 7
+                        target_date = today + datetime.timedelta(days=days_ahead)
+                        break
+                if target_date is None and re.search(r"\bnext week\b", text):
+                    target_date = today + datetime.timedelta(days=7)
+        if target_date is None:
+            iso = re.search(r"\b(\d{4}-\d{2}-\d{2})\b", text)
+            if iso:
+                target_date = datetime.date.fromisoformat(iso.group(1))
+        if target_date is None:
+            raise ValueError(f"Could not work out a date from '{expr}'.")
 
-        # Time resolution
         hour, minute = 10, 0
-        if "afternoon" in text:
-            hour, minute = 14, 0
-        elif "morning" in text:
-            hour, minute = 10, 0
-        elif "evening" in text:
-            hour, minute = 17, 0
+        if re.search(r"\bafternoon\b", text):
+            hour = 14
+        elif re.search(r"\bmorning\b", text):
+            hour = 10
+        elif re.search(r"\b(evening|tonight)\b", text):
+            hour = 17
+        elif re.search(r"\bnoon\b", text):
+            hour = 12
 
-        # Check for explicit hour e.g. "2pm", "14:00"
-        import re
-        time_match = re.search(r"(\d{1,2})(?::(\d{2}))?\s*(am|pm)?", text)
-        if time_match and ("am" in text or "pm" in text or ":" in text):
-            h = int(time_match.group(1))
-            m = int(time_match.group(2) or 0)
-            ampm = time_match.group(3)
-            if ampm == "pm" and h < 12:
-                h += 12
-            elif ampm == "am" and h == 12:
-                h = 0
-            hour, minute = h, m
+        clock = re.search(r"\b(\d{1,2})(?::(\d{2}))?\s*(am|pm)\b", text) or re.search(r"\b(\d{1,2}):(\d{2})()\b", text)
+        if clock:
+            hour = int(clock.group(1))
+            minute = int(clock.group(2) or 0)
+            meridiem = clock.group(3)
+            if meridiem == "pm" and hour < 12:
+                hour += 12
+            elif meridiem == "am" and hour == 12:
+                hour = 0
+        if not (0 <= hour <= 23 and 0 <= minute <= 59):
+            raise ValueError(f"Could not work out a time from '{expr}'.")
 
-        resolved_dt = datetime.datetime.combine(target_date, datetime.time(hour, minute))
-        return KATHMANDU_TZ.localize(resolved_dt)
+        return KATHMANDU_TZ.localize(datetime.datetime.combine(target_date, datetime.time(hour, minute)))
 
-    @staticmethod
-    def parse_datetime_kathmandu(dt_str: str) -> datetime.datetime:
+    @classmethod
+    def parse_datetime_kathmandu(cls, dt_str: str) -> datetime.datetime:
         """
-        Parses an ISO string or standard datetime and localizes to Asia/Kathmandu.
+        Parses an ISO string or a relative phrase and localizes to Asia/Kathmandu.
         """
+        raw = (dt_str or "").strip()
         try:
-            # Replace 'Z' if present
-            clean_str = dt_str.replace("Z", "+00:00")
-            dt = datetime.datetime.fromisoformat(clean_str)
+            dt = datetime.datetime.fromisoformat(raw.replace("Z", "+00:00"))
             if dt.tzinfo is None:
-                # Naive: treat as local Kathmandu time
                 return KATHMANDU_TZ.localize(dt)
             return dt.astimezone(KATHMANDU_TZ)
-        except Exception as e:
-            # Fallback for formats like "2026-11-02 14:00"
-            try:
-                dt = datetime.datetime.strptime(dt_str, "%Y-%m-%d %H:%M")
-                return KATHMANDU_TZ.localize(dt)
-            except Exception:
-                raise ValueError(f"Invalid datetime format: {dt_str}. Please use ISO format e.g. 'YYYY-MM-DDTHH:MM:SS'.")
+        except ValueError:
+            pass
+        try:
+            return KATHMANDU_TZ.localize(datetime.datetime.strptime(raw, "%Y-%m-%d %H:%M"))
+        except ValueError:
+            pass
+        try:
+            return cls.resolve_relative_datetime_kathmandu(raw)
+        except ValueError:
+            raise ValueError(
+                f"Invalid datetime format: {dt_str}. Please use ISO format e.g. 'YYYY-MM-DDTHH:MM:SS'."
+            )
+
+    @staticmethod
+    def practitioner_offers(practitioner: Practitioner, service: Service) -> bool:
+        """A practitioner with a specialties list only performs the services on it."""
+        specialties = practitioner.specialties
+        if not specialties:
+            return True
+        name = service.name.lower()
+        return service.name in specialties or any(name in spec.lower() for spec in specialties)
+
+    @classmethod
+    def _localize(cls, value: datetime.datetime) -> datetime.datetime:
+        if value.tzinfo is None:
+            return KATHMANDU_TZ.localize(value)
+        return value.astimezone(KATHMANDU_TZ)
 
     @classmethod
     async def is_holiday(cls, db: AsyncSession, org_id: str, target_date: datetime.date) -> Tuple[bool, Optional[str]]:
@@ -104,26 +157,25 @@ class SchedulingEngine:
 
     @classmethod
     async def get_opening_hours_for_day(cls, db: AsyncSession, org_id: str, weekday_name: str) -> Optional[Dict[str, str]]:
+        """Hours for one weekday, or None when the studio is closed that day."""
         stmt = select(WeeklyOpeningHours).where(
             WeeklyOpeningHours.org_id == org_id,
             WeeklyOpeningHours.day_of_week == weekday_name
         )
-        result = await db.execute(stmt)
-        record = result.scalars().first()
-        if record and not record.is_closed:
+        record = (await db.execute(stmt)).scalars().first()
+        if record is not None:
+            # A stored row is authoritative, including is_closed.
+            if record.is_closed:
+                return None
             return {"open": record.open_time, "close": record.close_time}
-        
-        # Hardcoded defaults if not in DB
-        default_hours = {
-            "Monday": {"open": "08:00", "close": "19:00"},
-            "Tuesday": {"open": "08:00", "close": "19:00"},
-            "Wednesday": {"open": "08:00", "close": "19:00"},
-            "Thursday": {"open": "08:00", "close": "19:00"},
-            "Friday": {"open": "08:00", "close": "19:00"},
-            "Saturday": {"open": "09:00", "close": "18:00"},
-            "Sunday": {"open": "10:00", "close": "16:00"},
-        }
-        return default_hours.get(weekday_name)
+
+        any_hours = (await db.execute(
+            select(WeeklyOpeningHours.id).where(WeeklyOpeningHours.org_id == org_id).limit(1)
+        )).first()
+        if any_hours is not None:
+            # The org defines its own week and has no row for this day: closed.
+            return None
+        return _DEFAULT_HOURS.get(weekday_name)
 
     @classmethod
     async def validate_slot(
@@ -138,26 +190,25 @@ class SchedulingEngine:
     ) -> Tuple[bool, str]:
         """
         Validates:
-        1. Inside opening hours
-        2. Fits full duration before closing
-        3. Not on a holiday
-        4. Practitioner not double-booked
-        5. Customer doesn't hold two simultaneous bookings
+        0. Not in the past
+        1. Not on a holiday
+        2. Inside opening hours and fits the full duration before closing
+        3. Practitioner not double-booked
+        4. Customer doesn't hold two simultaneous bookings
         """
-        # Ensure start_dt is in Kathmandu tz
-        if start_dt.tzinfo is None:
-            start_dt = KATHMANDU_TZ.localize(start_dt)
-        else:
-            start_dt = start_dt.astimezone(KATHMANDU_TZ)
-
+        start_dt = cls._localize(start_dt)
         end_dt = start_dt + datetime.timedelta(minutes=duration_minutes)
 
-        # 1. Holiday Check
+        if start_dt <= cls.now_kathmandu():
+            return False, (
+                f"{start_dt.strftime('%A, %b %d at %I:%M %p')} has already passed "
+                "(studio time is Asia/Kathmandu)."
+            )
+
         is_hol, hol_name = await cls.is_holiday(db, org_id, start_dt.date())
         if is_hol:
             return False, f"The studio is closed on {start_dt.date()} for '{hol_name}'."
 
-        # 2. Opening Hours Check
         weekday_name = start_dt.strftime("%A")
         hours = await cls.get_opening_hours_for_day(db, org_id, weekday_name)
         if not hours:
@@ -175,8 +226,7 @@ class SchedulingEngine:
                 f"falls outside {weekday_name} opening hours ({hours['open']} - {hours['close']})."
             )
 
-        # 3. Practitioner Double-booking check
-        # Convert to naive UTC or comparable datetime for SQL matching
+        # Bookings are stored as naive Asia/Kathmandu wall-clock time.
         naive_start = start_dt.replace(tzinfo=None)
         naive_end = end_dt.replace(tzinfo=None)
 
@@ -184,7 +234,7 @@ class SchedulingEngine:
         prac_query = select(Booking).where(
             Booking.org_id == org_id,
             Booking.practitioner_id == practitioner_id,
-            Booking.status.in_(["confirmed", "rescheduled"]),
+            Booking.status.in_(_ACTIVE_STATUSES),
             Booking.start_time < naive_end,
             Booking.end_time > naive_start
         )
@@ -195,11 +245,10 @@ class SchedulingEngine:
         if res.scalars().first():
             return False, "Practitioner is already booked during this time window (booked by another customer)."
 
-        # 4. Customer overlap check (customer cannot hold two bookings at the same time)
         cust_query = select(Booking).where(
             Booking.org_id == org_id,
             Booking.user_id == customer_id,
-            Booking.status.in_(["confirmed", "rescheduled"]),
+            Booking.status.in_(_ACTIVE_STATUSES),
             Booking.start_time < naive_end,
             Booking.end_time > naive_start
         )
@@ -208,7 +257,7 @@ class SchedulingEngine:
 
         res_cust = await db.execute(cust_query)
         if res_cust.scalars().first():
-            return False, f"You already have another active appointment booked during this time."
+            return False, "You already have another active appointment booked during this time."
 
         return True, "Slot is available."
 
@@ -219,15 +268,19 @@ class SchedulingEngine:
         org_id: str,
         service_id: str,
         target_date_str: str,
-        practitioner_id: Optional[str] = None
+        practitioner_id: Optional[str] = None,
+        customer_id: Optional[str] = None,
+        exclude_booking_id: Optional[str] = None,
+        part_of_day: Optional[str] = None,
     ) -> List[Dict[str, Any]]:
         """
-        Calculates all free slots on the given target date for the specified service and practitioner.
+        Free slots on the given date for the service, optionally limited to one practitioner,
+        one part of the day, and (when customer_id is given) times the customer is not already busy.
+        Past times are never offered.
         """
-        # Get service duration
-        s_stmt = select(Service).where(Service.id == service_id, Service.org_id == org_id)
-        s_res = await db.execute(s_stmt)
-        service = s_res.scalars().first()
+        service = (await db.execute(
+            select(Service).where(Service.id == service_id, Service.org_id == org_id)
+        )).scalars().first()
         if not service:
             return []
 
@@ -236,56 +289,61 @@ class SchedulingEngine:
         except Exception:
             return []
 
-        # Check holiday
-        is_hol, hol_name = await cls.is_holiday(db, org_id, target_date)
+        is_hol, _ = await cls.is_holiday(db, org_id, target_date)
         if is_hol:
             return []
 
-        weekday_name = target_date.strftime("%A")
-        hours = await cls.get_opening_hours_for_day(db, org_id, weekday_name)
+        hours = await cls.get_opening_hours_for_day(db, org_id, target_date.strftime("%A"))
         if not hours:
             return []
 
         open_h, open_m = map(int, hours["open"].split(":"))
         close_h, close_m = map(int, hours["close"].split(":"))
-
         day_start = KATHMANDU_TZ.localize(datetime.datetime.combine(target_date, datetime.time(open_h, open_m)))
         day_end = KATHMANDU_TZ.localize(datetime.datetime.combine(target_date, datetime.time(close_h, close_m)))
 
-        # Find practitioners eligible
+        prac_stmt = select(Practitioner).where(Practitioner.org_id == org_id)
         if practitioner_id:
-            prac_stmt = select(Practitioner).where(Practitioner.id == practitioner_id, Practitioner.org_id == org_id)
-        else:
-            prac_stmt = select(Practitioner).where(Practitioner.org_id == org_id)
-        p_res = await db.execute(prac_stmt)
-        practitioners = p_res.scalars().all()
+            prac_stmt = prac_stmt.where(Practitioner.id == practitioner_id)
+        practitioners = (await db.execute(prac_stmt)).scalars().all()
 
-        available_slots = []
-        step_minutes = 30  # Search every 30-min block
+        # One query for the whole day instead of one per candidate slot.
+        window_start = day_start.replace(tzinfo=None)
+        window_end = day_end.replace(tzinfo=None)
+        busy_rows = (await db.execute(
+            select(Booking).where(
+                Booking.org_id == org_id,
+                Booking.status.in_(_ACTIVE_STATUSES),
+                Booking.start_time < window_end,
+                Booking.end_time > window_start,
+            )
+        )).scalars().all()
+        if exclude_booking_id:
+            busy_rows = [row for row in busy_rows if row.id != exclude_booking_id]
+
+        hour_range = PARTS_OF_DAY.get((part_of_day or "").lower())
+        now = cls.now_kathmandu()
+        duration = datetime.timedelta(minutes=service.duration_minutes)
+        available_slots: List[Dict[str, Any]] = []
 
         for prac in practitioners:
-            # Filter by specialty if applicable
-            if service.name not in prac.specialties and len(prac.specialties) > 0:
-                # Check partial match
-                if not any(service.name.lower() in spec.lower() for spec in prac.specialties):
-                    continue
+            if not cls.practitioner_offers(prac, service):
+                continue
+            prac_busy = [row for row in busy_rows if row.practitioner_id == prac.id]
+            customer_busy = [row for row in busy_rows if customer_id and row.user_id == customer_id]
 
             curr = day_start
-            while curr + datetime.timedelta(minutes=service.duration_minutes) <= day_end:
-                slot_end = curr + datetime.timedelta(minutes=service.duration_minutes)
+            while curr + duration <= day_end:
+                slot_end = curr + duration
                 naive_start = curr.replace(tzinfo=None)
                 naive_end = slot_end.replace(tzinfo=None)
-
-                # Check conflict
-                conflict_stmt = select(Booking).where(
-                    Booking.org_id == org_id,
-                    Booking.practitioner_id == prac.id,
-                    Booking.status.in_(["confirmed", "rescheduled"]),
-                    Booking.start_time < naive_end,
-                    Booking.end_time > naive_start
-                )
-                res = await db.execute(conflict_stmt)
-                if not res.scalars().first():
+                in_part = hour_range is None or hour_range[0] <= curr.hour < hour_range[1]
+                if (
+                    curr > now
+                    and in_part
+                    and not any(row.start_time < naive_end and row.end_time > naive_start for row in prac_busy)
+                    and not any(row.start_time < naive_end and row.end_time > naive_start for row in customer_busy)
+                ):
                     available_slots.append({
                         "practitioner_id": prac.id,
                         "practitioner_name": prac.name,
@@ -293,11 +351,11 @@ class SchedulingEngine:
                         "service_name": service.name,
                         "start_time": curr.isoformat(),
                         "end_time": slot_end.isoformat(),
-                        "formatted": f"{curr.strftime('%Y-%m-%d %I:%M %p')} with {prac.name}"
+                        "formatted": f"{curr.strftime('%a %Y-%m-%d %I:%M %p')} with {prac.name}"
                     })
+                curr += datetime.timedelta(minutes=SLOT_STEP_MINUTES)
 
-                curr += datetime.timedelta(minutes=step_minutes)
-
+        available_slots.sort(key=lambda slot: (slot["start_time"], slot["practitioner_name"]))
         return available_slots
 
     @classmethod
@@ -308,18 +366,25 @@ class SchedulingEngine:
         service_id: str,
         requested_dt: datetime.datetime,
         practitioner_id: Optional[str] = None,
-        count: int = 3
+        count: int = 3,
+        customer_id: Optional[str] = None,
+        exclude_booking_id: Optional[str] = None,
     ) -> List[Dict[str, Any]]:
         """
-        Finds the nearest alternative free slots on the same day or next consecutive days.
+        The free slots closest in time to the requested one, looking one day back and
+        three days forward. Sorted by distance from the request, then returned in time order.
         """
-        alternatives = []
-        for day_offset in range(0, 3):
-            check_date = (requested_dt + datetime.timedelta(days=day_offset)).date()
-            slots = await cls.find_available_slots(db, org_id, service_id, check_date.isoformat(), practitioner_id)
-            for s in slots:
-                alternatives.append(s)
-                if len(alternatives) >= count:
-                    return alternatives
-        return alternatives
+        requested = cls._localize(requested_dt)
+        candidates: List[Dict[str, Any]] = []
+        for day_offset in range(-1, 4):
+            check_date = (requested + datetime.timedelta(days=day_offset)).date()
+            candidates.extend(await cls.find_available_slots(
+                db, org_id, service_id, check_date.isoformat(), practitioner_id,
+                customer_id=customer_id, exclude_booking_id=exclude_booking_id,
+            ))
 
+        def distance(slot: Dict[str, Any]) -> float:
+            return abs((datetime.datetime.fromisoformat(slot["start_time"]) - requested).total_seconds())
+
+        nearest = sorted(candidates, key=distance)[:count]
+        return sorted(nearest, key=lambda slot: slot["start_time"])

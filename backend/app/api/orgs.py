@@ -13,7 +13,7 @@ router = APIRouter(prefix="/orgs", tags=["Organisations"])
 async def list_organisations(db: AsyncSession = Depends(get_db)):
     stmt = select(Organisation)
     res = await db.execute(stmt)
-    return [OrgOut.from_orm(o) for o in res.scalars().all()]
+    return [OrgOut.model_validate(o) for o in res.scalars().all()]
 
 @router.get("/{slug_or_id}", response_model=OrgOut)
 async def get_organisation(slug_or_id: str, db: AsyncSession = Depends(get_db)):
@@ -27,5 +27,5 @@ async def get_organisation(slug_or_id: str, db: AsyncSession = Depends(get_db)):
             status_code=status.HTTP_404_NOT_FOUND,
             detail=f"Organisation '{slug_or_id}' not found."
         )
-    return OrgOut.from_orm(org)
+    return OrgOut.model_validate(org)
 

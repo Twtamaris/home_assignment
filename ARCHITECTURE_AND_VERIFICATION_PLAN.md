@@ -1,3 +1,7 @@
+> **Superseded. Read [README.md](README.md) instead.** This file describes an earlier iteration of the project
+> (a "43-scenario" suite, a "hybrid BM25 + vector" retriever, a mutex-based booking lock, and test names that no longer
+> exist). The current architecture, decisions and eval results are in the README. It is kept only as history and can be deleted.
+
 # Comprehensive Architecture, Implementation & Verification Plan
 **Multi-Tenant Authenticated Agent Platform**
 *Cross-Checking, Independent Verification & Audit Response Specification*

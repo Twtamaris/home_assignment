@@ -4,7 +4,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.core.config import settings
-from app.core.database import async_engine, Base
+from app.core.database import async_engine, Base, upgrade_sqlite_schema
 from app.api import auth, orgs, chat, orders, bookings, admin, actions
 
 @asynccontextmanager
@@ -12,6 +12,7 @@ async def lifespan(app: FastAPI):
     # Ensure tables are initialized on startup
     async with async_engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
+        await conn.run_sync(upgrade_sqlite_schema)
     yield
 
 app = FastAPI(
@@ -22,10 +23,11 @@ app = FastAPI(
 )
 
 # CORS Setup
+# Bearer tokens travel in the Authorization header, so cookies (and credentialed CORS) are not needed.
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
+    allow_origins=[origin.strip() for origin in settings.CORS_ORIGINS.split(",") if origin.strip()],
+    allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"],
 )
@@ -45,6 +47,6 @@ async def health_check():
         "status": "healthy",
         "env": settings.APP_ENV,
         "llm_provider": settings.LLM_PROVIDER,
-        "studio_timezone": settings.STUDIO_TIMEZONE
+        "studio_timezone": "Asia/Kathmandu"
     }
 

@@ -9,6 +9,7 @@ export interface Organisation {
   agent_name: string
   agent_role: string
   greeting?: string
+  agent_kind: 'retail' | 'studio'
 }
 
 export interface User {
@@ -40,6 +41,28 @@ export interface ToolCall {
   message?: string
   result?: any
   status?: string
+}
+
+export interface ProposalState {
+  status: string
+  expires_at?: string | null
+}
+
+export interface AdminOrder extends Order {
+  customer_name: string
+  customer_email: string
+}
+
+export interface AdminBooking {
+  id: string
+  status: string
+  start_time: string
+  end_time: string
+  service_name: string
+  practitioner_name: string
+  customer_name: string
+  customer_email: string
+  cancellation_fee: number
 }
 
 export interface Message {

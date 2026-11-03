@@ -6,10 +6,12 @@ import { ArrowLeft, ArrowRight, UserPlus } from 'lucide-react'
 
 interface SignupPageProps {
   onNavigateToLogin: () => void
-  currentOrg: Organisation
+  /** The organisation of the entry point the visitor is on. The new account is created in this organisation. */
+  entryOrg: Organisation
 }
 
-export const SignupPage: React.FC<SignupPageProps> = ({ onNavigateToLogin, currentOrg }) => {
+export const SignupPage: React.FC<SignupPageProps> = ({ onNavigateToLogin, entryOrg }) => {
+  const currentOrg = entryOrg
   const { register } = useAuth()
   const [name, setName] = useState('')
   const [email, setEmail] = useState('')
@@ -52,7 +54,7 @@ export const SignupPage: React.FC<SignupPageProps> = ({ onNavigateToLogin, curre
             Sign up for <span className="font-semibold text-white">{currentOrg.name}</span>
           </p>
           <div className="inline-block px-2.5 py-1 rounded-full text-[10px] font-mono text-emerald-300 bg-emerald-950/60 border border-emerald-500/30">
-            Assigned Tenant: org_id = {currentOrg.id}
+            Your account will belong to {currentOrg.name} (org_id = {currentOrg.id})
           </div>
         </div>
 
@@ -67,7 +69,7 @@ export const SignupPage: React.FC<SignupPageProps> = ({ onNavigateToLogin, curre
             <div>
               <label className="block text-xs font-medium text-slate-300 mb-1">Full Name</label>
               <input
-                type="text"
+                type="text" autoComplete="name"
                 required
                 value={name}
                 onChange={(e) => setName(e.target.value)}
@@ -79,7 +81,7 @@ export const SignupPage: React.FC<SignupPageProps> = ({ onNavigateToLogin, curre
             <div>
               <label className="block text-xs font-medium text-slate-300 mb-1">Email Address</label>
               <input
-                type="email"
+                type="email" autoComplete="username"
                 required
                 value={email}
                 onChange={(e) => setEmail(e.target.value)}
@@ -95,7 +97,7 @@ export const SignupPage: React.FC<SignupPageProps> = ({ onNavigateToLogin, curre
                 required
                 value={password}
                 onChange={(e) => setPassword(e.target.value)}
-                placeholder="Minimum 8 characters"
+                placeholder="Minimum 8 characters" minLength={8} autoComplete="new-password"
                 className="w-full px-3.5 py-2.5 rounded-xl bg-slate-950 border border-slate-800 text-white text-xs sm:text-sm placeholder-slate-500 focus:outline-hidden focus:border-emerald-500 focus:ring-1 focus:ring-emerald-500/30 transition"
               />
             </div>

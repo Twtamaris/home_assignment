@@ -21,7 +21,7 @@ async def list_services(
 ):
     stmt = select(Service).where(Service.org_id == current_user.org_id)
     res = await db.execute(stmt)
-    return [ServiceOut.from_orm(s) for s in res.scalars().all()]
+    return [ServiceOut.model_validate(s) for s in res.scalars().all()]
 
 @router.get("/practitioners", response_model=List[PractitionerOut])
 async def list_practitioners(
@@ -100,35 +100,9 @@ async def create_booking_endpoint(
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user)
 ):
-    res = await AgentBTools.create_booking(
-        db, current_user.org_id, current_user.id,
-        payload.service_id, payload.practitioner_id, payload.start_time, payload.notes
-    )
-    if not res.get("success"):
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail=res.get("error") or res.get("message")
-        )
-
-    b_stmt = select(Booking).where(Booking.id == res["booking_id"])
-    b_res = await db.execute(b_stmt)
-    b = b_res.scalars().first()
-
-    return BookingOut(
-        id=b.id,
-        org_id=b.org_id,
-        user_id=b.user_id,
-        service_id=b.service_id,
-        practitioner_id=b.practitioner_id,
-        start_time=b.start_time,
-        end_time=b.end_time,
-        status=b.status,
-        cancellation_fee=b.cancellation_fee or 0.0,
-        reschedule_count=b.reschedule_count or 0,
-        notes=b.notes,
-        service_name=res["service_name"],
-        practitioner_name=res["practitioner_name"],
-        created_at=b.created_at
+    raise HTTPException(
+        status_code=status.HTTP_400_BAD_REQUEST,
+        detail="Create a proposal in chat, then POST /api/actions/proposals/{proposal_id}/confirm.",
     )
 
 @router.post("/{booking_id}/reschedule")
@@ -138,15 +112,10 @@ async def reschedule_booking_endpoint(
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user)
 ):
-    res = await AgentBTools.reschedule_booking(
-        db, current_user.org_id, current_user.id, booking_id, payload.new_start_time
+    raise HTTPException(
+        status_code=status.HTTP_400_BAD_REQUEST,
+        detail="Create a proposal in chat, then POST /api/actions/proposals/{proposal_id}/confirm.",
     )
-    if not res.get("success"):
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail=res.get("error") or res.get("message")
-        )
-    return res
 
 @router.post("/{booking_id}/cancel")
 async def cancel_booking_endpoint(
@@ -154,11 +123,8 @@ async def cancel_booking_endpoint(
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user)
 ):
-    res = await AgentBTools.cancel_booking(db, current_user.org_id, current_user.id, booking_id)
-    if not res.get("success"):
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail=res.get("error")
-        )
-    return res
+    raise HTTPException(
+        status_code=status.HTTP_400_BAD_REQUEST,
+        detail="Create a proposal in chat, then POST /api/actions/proposals/{proposal_id}/confirm.",
+    )
 

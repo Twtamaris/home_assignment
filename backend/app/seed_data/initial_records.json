@@ -4,25 +4,27 @@
       "id": "org_a",
       "slug": "himali-tea",
       "name": "Himali Tea House",
-      "tagline": "Hello! I'm your tea assistant. Sign in to track orders or discover new blends.",
+      "tagline": "Single-origin Himalayan loose-leaf teas and teaware, delivered from Illam",
       "primary_color": "#1b4332",
       "secondary_color": "#2d6a4f",
       "accent_color": "#d4a373",
       "agent_name": "Tenzin",
       "agent_role": "Tea Specialist & Ordering Guide",
-      "greeting": "Namaste! Welcome to Himali Tea House. I can assist you with our single-origin orthodox teas, brewing guides, placing or editing orders, checking stock, and repeating your past favorites. How can I help you today?"
+      "greeting": "Namaste! Welcome to Himali Tea House. I can assist you with our single-origin orthodox teas, brewing guides, placing or editing orders, checking stock, and repeating your past favorites. How can I help you today?",
+      "agent_kind": "retail"
     },
     {
       "id": "org_b",
       "slug": "lotus-wellness",
       "name": "Lotus Wellness Studio",
-      "tagline": "Namaste! I'm your wellness assistant. Sign in to book or manage your appointments.",
+      "tagline": "Massage, physiotherapy and yoga in the heart of Lalitpur",
       "primary_color": "#2e1f47",
       "secondary_color": "#4a3b68",
       "accent_color": "#38b2ac",
       "agent_name": "Maya",
       "agent_role": "Wellness Coordinator",
-      "greeting": "Namaste! Welcome to Lotus Wellness Studio. I can assist you with service questions, booking appointments with Dr. Sunita, Master Tenzing, or Aarati, and managing your schedule in Asia/Kathmandu time (UTC+05:45). How may I support your wellness today?"
+      "greeting": "Namaste! Welcome to Lotus Wellness Studio. I can assist you with service questions, booking appointments with Dr. Sunita, Master Tenzing, or Aarati, and managing your schedule in Asia/Kathmandu time (UTC+05:45). How may I support your wellness today?",
+      "agent_kind": "studio"
     }
   ],
   "users": [
@@ -63,7 +65,7 @@
       "org_id": "org_b",
       "email": "rohan@lotus.test",
       "password": "Password123!",
-      "name": "Rohan श्रेष्ठ",
+      "name": "Rohan Shrestha",
       "role": "customer"
     },
     {
@@ -325,34 +327,65 @@
       "id": "prac_1",
       "name": "Dr. Sunita Shrestha",
       "title": "Senior Physiotherapist",
-      "specialties": ["Sports Physiotherapy Assessment & Rehab", "Dry Needling & Trigger Point Therapy"],
+      "specialties": [
+        "Sports Physiotherapy Assessment & Rehab",
+        "Dry Needling & Trigger Point Therapy"
+      ],
       "bio": "11 years clinical experience treating athletes, post-surgical recovery, and spinal biomechanics."
     },
     {
       "id": "prac_2",
       "name": "Master Tenzing Norbu",
       "title": "Senior Bodywork Therapist",
-      "specialties": ["Deep Tissue Therapeutic Massage", "Ayurvedic Abhyanga Restorative Massage", "Himalayan Herbal Steam & Scrub"],
+      "specialties": [
+        "Deep Tissue Therapeutic Massage",
+        "Ayurvedic Abhyanga Restorative Massage",
+        "Himalayan Herbal Steam & Scrub"
+      ],
       "bio": "14 years experience specializing in neuromuscular myofascial release and traditional Ayurvedic healing."
     },
     {
       "id": "prac_3",
       "name": "Aarati Maharjan",
       "title": "Master Yoga & Sound Instructor",
-      "specialties": ["Private 1-on-1 Hatha & Vinyasa Yoga", "Sound Bath & Tibetan Singing Bowl Therapy"],
+      "specialties": [
+        "Private 1-on-1 Hatha & Vinyasa Yoga",
+        "Sound Bath & Tibetan Singing Bowl Therapy"
+      ],
       "bio": "8 years guiding restorative breathwork, Hatha alignment, and Himalayan singing bowl sound healing."
     }
   ],
   "opening_hours": {
     "timezone": "Asia/Kathmandu",
     "schedule": {
-      "Monday": { "open": "08:00", "close": "19:00" },
-      "Tuesday": { "open": "08:00", "close": "19:00" },
-      "Wednesday": { "open": "08:00", "close": "19:00" },
-      "Thursday": { "open": "08:00", "close": "19:00" },
-      "Friday": { "open": "08:00", "close": "19:00" },
-      "Saturday": { "open": "09:00", "close": "18:00" },
-      "Sunday": { "open": "10:00", "close": "16:00" }
+      "Monday": {
+        "open": "08:00",
+        "close": "19:00"
+      },
+      "Tuesday": {
+        "open": "08:00",
+        "close": "19:00"
+      },
+      "Wednesday": {
+        "open": "08:00",
+        "close": "19:00"
+      },
+      "Thursday": {
+        "open": "08:00",
+        "close": "19:00"
+      },
+      "Friday": {
+        "open": "08:00",
+        "close": "19:00"
+      },
+      "Saturday": {
+        "open": "09:00",
+        "close": "18:00"
+      },
+      "Sunday": {
+        "open": "10:00",
+        "close": "16:00"
+      }
     }
   },
   "holidays": [
@@ -374,4 +407,3 @@
     }
   ]
 }
-

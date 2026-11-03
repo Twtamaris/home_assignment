@@ -1,7 +1,16 @@
-import os
+"""Rebuild the relational database and both knowledge bases from the seed files.
+
+    python scripts/seed.py              drop everything and rebuild
+    python scripts/seed.py --if-missing only seed when the database is empty (used by Docker start-up)
+
+Organisations, products, services and knowledge documents are all driven by the files in
+app/seed_data. Booking and order fixtures are dated relative to the day the seed runs, so
+"past" bookings are always in the past and the upcoming one is always in the future.
+"""
 import sys
 import json
 import asyncio
+import datetime
 from pathlib import Path
 
 # Add backend directory to sys.path
@@ -9,7 +18,7 @@ backend_dir = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(backend_dir))
 
 from sqlalchemy.ext.asyncio import create_async_engine, async_sessionmaker
-from sqlalchemy import select, delete
+from sqlalchemy import select, func
 
 from app.core.config import settings
 from app.core.database import Base
@@ -17,69 +26,64 @@ from app.core.security import get_password_hash
 from app.models.models import (
     Organisation, User, Product, Service, Practitioner,
     Holiday, WeeklyOpeningHours, Order, OrderItem, OrderStatusHistory, Booking,
-    KnowledgeChunk, CustomerMemory, Conversation, Message, InventoryEvent
+    CustomerMemory, Conversation, InventoryEvent
 )
-from app.services.knowledge_base import get_embedding
+from app.services import knowledge_base as kb
+from app.services.seeding import ingest_knowledge, knowledge_dirs
+from app.services.scheduling import KATHMANDU_TZ
+
 if sys.platform == "win32":
     try:
         sys.stdout.reconfigure(encoding="utf-8")
     except Exception:
         pass
 
-def parse_markdown_chunks(file_path: Path, doc_name: str) -> list:
-    """
-    Splits markdown by headings (#, ##, ###) while preserving document hierarchy.
-    Ensures complete, coherent semantic units (e.g. individual FAQs, policies, guides).
-    """
-    text = file_path.read_text(encoding="utf-8")
-    lines = text.splitlines()
 
-    chunks = []
-    current_section = "Overview"
-    current_lines = []
+def _first_org(data: dict, kind: str) -> str:
+    for org in data["organisations"]:
+        if (org.get("agent_kind") or "retail") == kind:
+            return org["id"]
+    raise SystemExit(f"initial_records.json has no organisation with agent_kind '{kind}'")
 
-    for line in lines:
-        if line.startswith("# ") or line.startswith("## ") or line.startswith("### "):
-            if current_lines:
-                chunk_body = "\n".join(current_lines).strip()
-                if chunk_body:
-                    chunks.append({
-                        "doc_name": doc_name,
-                        "section_name": current_section,
-                        "content": chunk_body
-                    })
-            current_section = line.lstrip("#").strip()
-            current_lines = [line]
-        else:
-            current_lines.append(line)
 
-    if current_lines:
-        chunk_body = "\n".join(current_lines).strip()
-        if chunk_body:
-            chunks.append({
-                "doc_name": doc_name,
-                "section_name": current_section,
-                "content": chunk_body
-            })
+def _next_open_day(start: datetime.date, closed_dates: set) -> datetime.date:
+    day = start
+    while day.isoformat() in closed_dates:
+        day += datetime.timedelta(days=1)
+    return day
 
-    return chunks
 
-async def seed():
-    print("[*] Rebuilding database and knowledge bases...")
+async def _already_seeded(engine) -> bool:
+    try:
+        async with engine.connect() as conn:
+            return (await conn.execute(select(func.count()).select_from(Organisation))).scalar() > 0
+    except Exception:
+        return False
+
+
+async def seed(if_missing: bool = False):
     engine = create_async_engine(settings.DATABASE_URL, echo=False)
-    async_session = async_sessionmaker(engine, expire_on_commit=False)
+    if if_missing and await _already_seeded(engine):
+        print("[*] Database already seeded, leaving it as it is.")
+        await engine.dispose()
+        return
 
+    print("[*] Rebuilding database and knowledge bases...")
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.drop_all)
         await conn.run_sync(Base.metadata.create_all)
+    kb.reset_collection()
+    async_session = async_sessionmaker(engine, expire_on_commit=False)
 
-    # Load initial JSON data
-    seed_json_path = backend_dir / "app" / "seed_data" / "initial_records.json"
-    data = json.loads(seed_json_path.read_text(encoding="utf-8"))
+    data = json.loads((backend_dir / "app" / "seed_data" / "initial_records.json").read_text(encoding="utf-8"))
+    retail_org = _first_org(data, "retail")
+    studio_org = _first_org(data, "studio")
+
+    now_utc = datetime.datetime.now(datetime.timezone.utc).replace(tzinfo=None)
+    now_ktm = datetime.datetime.now(KATHMANDU_TZ).replace(tzinfo=None)
 
     async with async_session() as session:
-        # 1. Organisations
-        print(" -> Seeding Organisations...")
+        print(" -> Seeding organisations...")
         for org in data["organisations"]:
             session.add(Organisation(
                 id=org["id"],
@@ -91,12 +95,12 @@ async def seed():
                 accent_color=org.get("accent_color", "#d4a373"),
                 agent_name=org.get("agent_name", "Assistant"),
                 agent_role=org.get("agent_role", "Guide"),
-                greeting=org.get("greeting")
+                greeting=org.get("greeting"),
+                agent_kind=org.get("agent_kind") or "retail",
             ))
         await session.commit()
 
-        # 2. Users
-        print(" -> Seeding Users (Customers & Admins)...")
+        print(" -> Seeding users (customers and admins)...")
         for u in data["users"]:
             session.add(User(
                 id=u["id"],
@@ -108,11 +112,10 @@ async def seed():
             ))
         await session.commit()
 
-        # 3. Products (Org A)
-        print(f" -> Seeding Products for Org A ({len(data['products'])} items)...")
+        print(f" -> Seeding {len(data['products'])} products...")
         for p in data["products"]:
             session.add(Product(
-                org_id="org_a",
+                org_id=p.get("org_id", retail_org),
                 sku=p["sku"],
                 name=p["name"],
                 category=p["category"],
@@ -122,239 +125,160 @@ async def seed():
             ))
         await session.commit()
 
-        # 4. Services & Practitioners (Org B)
-        print(f" -> Seeding Services ({len(data['services'])}) and Practitioners ({len(data['practitioners'])}) for Org B...")
+        print(f" -> Seeding {len(data['services'])} services, {len(data['practitioners'])} practitioners, hours and holidays...")
         for s in data["services"]:
             session.add(Service(
                 id=s["id"],
-                org_id="org_b",
+                org_id=s.get("org_id", studio_org),
                 name=s["name"],
                 duration_minutes=s["duration_minutes"],
                 price=s["price"],
                 description=s["description"]
             ))
-
         for pr in data["practitioners"]:
             prac = Practitioner(
                 id=pr["id"],
-                org_id="org_b",
+                org_id=pr.get("org_id", studio_org),
                 name=pr["name"],
                 title=pr["title"],
                 bio=pr["bio"]
             )
             prac.specialties = pr["specialties"]
             session.add(prac)
-
-        # Weekly Hours (Org B)
-        opening = data["opening_hours"]["schedule"]
-        for day, times in opening.items():
+        for day, times in data["opening_hours"]["schedule"].items():
             session.add(WeeklyOpeningHours(
-                org_id="org_b",
+                org_id=data["opening_hours"].get("org_id", studio_org),
                 day_of_week=day,
                 open_time=times["open"],
                 close_time=times["close"],
-                is_closed=False
+                is_closed=bool(times.get("closed", False)),
             ))
-
-        # Holidays (Org B)
         for h in data["holidays"]:
-            session.add(Holiday(
-                org_id="org_b",
-                holiday_date=h["date"],
-                name=h["name"]
+            session.add(Holiday(org_id=h.get("org_id", studio_org), holiday_date=h["date"], name=h["name"]))
+        await session.commit()
+
+        # ---- Retail demo orders: 3 customers, 2 with past orders, 1 with a pending order ----
+        print(" -> Seeding conversations and orders for the retail organisation...")
+        stamp = {"o1": now_utc - datetime.timedelta(days=12), "o2": now_utc - datetime.timedelta(days=24),
+                 "o3": now_utc - datetime.timedelta(hours=1)}
+        session.add_all([
+            Conversation(id="conv_seed_a1", org_id=retail_org, user_id="user_a1", title="Spring Teas Order Inquiry",
+                         agent_type="customer", created_at=stamp["o2"], updated_at=stamp["o1"]),
+            Conversation(id="conv_seed_a2", org_id=retail_org, user_id="user_a2", title="Green Pearl Tea Purchase",
+                         agent_type="customer", created_at=stamp["o3"], updated_at=stamp["o3"]),
+            Conversation(id="conv_seed_a3", org_id=retail_org, user_id="user_a3", title="General Catalog Question",
+                         agent_type="customer"),
+        ])
+        await session.commit()
+
+        demo_orders = [
+            ("ORD-1001", "user_a1", "conv_seed_a1", "confirmed", "Thamel, Kathmandu, Nepal", stamp["o1"], [
+                ("HT-SN-100", 1), ("HT-BT-100", 1)]),
+            ("ORD-1002", "user_a1", "conv_seed_a1", "delivered", "Thamel, Kathmandu, Nepal", stamp["o2"], [
+                ("HT-OL-100", 1)]),
+            ("ORD-1003", "user_a2", "conv_seed_a2", "pending", "Baluwatar, Kathmandu, Nepal", stamp["o3"], [
+                ("HT-GT-100", 1)]),
+        ]
+        products = {p.sku: p for p in (await session.execute(
+            select(Product).where(Product.org_id == retail_org))).scalars().all()}
+        for order_id, user_id, conv_id, status, address, created, lines in demo_orders:
+            resolved = [
+                {"sku": sku, "name": products[sku].name, "unit_price": products[sku].price,
+                 "quantity": qty, "subtotal": products[sku].price * qty}
+                for sku, qty in lines
+            ]
+            order = Order(
+                id=order_id, org_id=retail_org, user_id=user_id, conversation_id=conv_id, status=status,
+                total_price=sum(line["subtotal"] for line in resolved), shipping_address=address,
+                created_at=created, updated_at=created,
+            )
+            order.items = resolved
+            session.add(order)
+            await session.flush()
+            for line in resolved:
+                session.add(OrderItem(
+                    org_id=retail_org, order_id=order_id, product_id=products[line["sku"]].id, sku=line["sku"],
+                    name=line["name"], quantity=line["quantity"], unit_price=line["unit_price"], subtotal=line["subtotal"],
+                ))
+                session.add(InventoryEvent(
+                    org_id=retail_org, product_id=products[line["sku"]].id, sku=line["sku"], delta=-line["quantity"],
+                    reason="order_created", stock_after=products[line["sku"]].stock, created_at=created,
+                ))
+            session.add(OrderStatusHistory(order_id=order_id, old_status="none", new_status="pending",
+                                           changed_by="Customer", reason="Order placed in chat", created_at=created))
+            if status in ("confirmed", "delivered"):
+                session.add(OrderStatusHistory(order_id=order_id, old_status="pending", new_status="confirmed",
+                                               changed_by="Store Manager", reason="Payment confirmed (cash on delivery)",
+                                               created_at=created + datetime.timedelta(hours=2)))
+            if status == "delivered":
+                session.add(OrderStatusHistory(order_id=order_id, old_status="confirmed", new_status="delivered",
+                                               changed_by="Courier", reason="Signed upon delivery",
+                                               created_at=created + datetime.timedelta(days=3)))
+        await session.commit()
+
+        # ---- Studio demo bookings: 3 customers, 2 with past bookings, plus one upcoming ----
+        print(" -> Seeding conversations and bookings for the studio organisation...")
+        session.add_all([
+            Conversation(id="conv_seed_b1", org_id=studio_org, user_id="user_b1", title="Therapeutic Massage Consultation",
+                         agent_type="customer", created_at=now_utc - datetime.timedelta(days=6)),
+            Conversation(id="conv_seed_b2", org_id=studio_org, user_id="user_b2", title="Sports Rehab Followup",
+                         agent_type="customer", created_at=now_utc - datetime.timedelta(days=3)),
+            Conversation(id="conv_seed_b3", org_id=studio_org, user_id="user_b3", title="Yoga Schedule Inquiry",
+                         agent_type="customer"),
+        ])
+        await session.commit()
+
+        closed = {h["date"] for h in data["holidays"]}
+        past_1 = (now_ktm - datetime.timedelta(days=3)).replace(hour=10, minute=0, second=0, microsecond=0)
+        past_2 = (now_ktm - datetime.timedelta(days=1)).replace(hour=14, minute=0, second=0, microsecond=0)
+        next_day = _next_open_day((now_ktm + datetime.timedelta(days=2)).date(), closed)
+        upcoming = datetime.datetime.combine(next_day, datetime.time(11, 0))
+        services = {s.id: s for s in (await session.execute(select(Service).where(Service.org_id == studio_org))).scalars().all()}
+
+        demo_bookings = [
+            ("BKG-2001", "user_b1", "conv_seed_b1", "srv_1", "prac_2", past_1, "Focus on upper trapezius stiffness."),
+            ("BKG-2002", "user_b2", "conv_seed_b2", "srv_3", "prac_1", past_2, "Post-knee arthroscopy follow-up."),
+            # Upcoming appointment held by Rohan. It occupies Master Tenzing at this time, so a
+            # booking or reschedule by another customer into that slot is refused.
+            ("BKG-2003", "user_b1", "conv_seed_b1", "srv_1", "prac_2", upcoming, "Follow-up deep tissue session."),
+        ]
+        for booking_id, user_id, conv_id, service_id, prac_id, start, notes in demo_bookings:
+            session.add(Booking(
+                id=booking_id, org_id=studio_org, user_id=user_id, conversation_id=conv_id, service_id=service_id,
+                practitioner_id=prac_id, start_time=start,
+                end_time=start + datetime.timedelta(minutes=services[service_id].duration_minutes),
+                status="confirmed", notes=notes, created_at=min(start, now_ktm) - datetime.timedelta(days=2),
             ))
         await session.commit()
 
-        # 5. Conversations & Past Orders for Org A Customers (Rule: 3 customers, 2 with past orders)
-        print(" -> Seeding Conversations and Past Orders for Org A customers...")
-        conv_a1 = Conversation(
-            id="conv_seed_a1",
-            org_id="org_a",
-            user_id="user_a1",
-            title="Spring Teas Order Inquiry",
-            agent_type="customer"
-        )
-        conv_a2 = Conversation(
-            id="conv_seed_a2",
-            org_id="org_a",
-            user_id="user_a2",
-            title="Green Pearl Tea Purchase",
-            agent_type="customer"
-        )
-        conv_a3 = Conversation(
-            id="conv_seed_a3",
-            org_id="org_a",
-            user_id="user_a3",
-            title="General Catalog Question",
-            agent_type="customer"
-        )
-        session.add_all([conv_a1, conv_a2, conv_a3])
+        # ---- Long-term customer memory ----
+        session.add(CustomerMemory(org_id=retail_org, user_id="user_a1", memory_key="usual_tea",
+                                   memory_value=products["HT-SN-100"].name))
+        session.add(CustomerMemory(org_id=studio_org, user_id="user_b1", memory_key="preferred_practitioner",
+                                   memory_value="Master Tenzing Norbu"))
         await session.commit()
 
-        # Order 1 for Aayush (confirmed order)
-        o1 = Order(
-            id="ORD-1001",
-            org_id="org_a",
-            user_id="user_a1",
-            conversation_id=conv_a1.id,
-            status="confirmed",
-            total_price=2800.0,
-            shipping_address="Thamel, Kathmandu, Nepal"
-        )
-        o1.items = [
-            {"sku": "HT-SN-100", "name": "Himalayan Spring Silver Needle (100g)", "unit_price": 1850.0, "quantity": 1, "subtotal": 1850.0},
-            {"sku": "HT-BT-100", "name": "Golden Tippy Orthodox Black Tea (100g)", "unit_price": 950.0, "quantity": 1, "subtotal": 950.0}
-        ]
-        session.add(o1)
-
-        # Order 2 for Aayush (delivered order)
-        o2 = Order(
-            id="ORD-1002",
-            org_id="org_a",
-            user_id="user_a1",
-            conversation_id=conv_a1.id,
-            status="delivered",
-            total_price=1600.0,
-            shipping_address="Thamel, Kathmandu, Nepal"
-        )
-        o2.items = [
-            {"sku": "HT-OL-100", "name": "Shangri-La High Mountain Oolong (100g)", "unit_price": 1600.0, "quantity": 1, "subtotal": 1600.0}
-        ]
-        session.add(o2)
-
-        # Order 3 for Priya (pending order to test edit & cancel)
-        o3 = Order(
-            id="ORD-1003",
-            org_id="org_a",
-            user_id="user_a2",
-            conversation_id=conv_a2.id,
-            status="pending",
-            total_price=1200.0,
-            shipping_address="Baluwatar, Kathmandu, Nepal"
-        )
-        o3.items = [
-            {"sku": "HT-GT-100", "name": "Dhankuta Imperial Green Pearls (100g)", "unit_price": 1200.0, "quantity": 1, "subtotal": 1200.0}
-        ]
-        session.add(o3)
+        # ---- Knowledge bases: one folder per organisation ----
+        known = {o["id"] for o in data["organisations"]}
+        indexed_all = True
+        for org_id, directory in knowledge_dirs().items():
+            if org_id not in known:
+                continue  # e.g. org_c_knowledge is loaded by add_third_org.py
+            print(f" -> Ingesting knowledge base for {org_id} ({directory.name})...")
+            count, indexed = await ingest_knowledge(session, org_id, directory)
+            indexed_all = indexed_all and indexed
+            print(f"    {count} chunks, {'vectors stored in Chroma' if indexed else 'relational rows only'}")
         await session.commit()
 
-        # Seed relational OrderItems for analytics & sales accuracy
-        prod_map = {p.sku: p.id for p in (await session.execute(select(Product).where(Product.org_id == "org_a"))).scalars().all()}
-        order_items_to_seed = [
-            OrderItem(org_id="org_a", order_id="ORD-1001", product_id=prod_map.get("HT-SN-100", 1), sku="HT-SN-100", name="Himalayan Spring Silver Needle (100g)", quantity=1, unit_price=1850.0, subtotal=1850.0),
-            OrderItem(org_id="org_a", order_id="ORD-1001", product_id=prod_map.get("HT-BT-100", 2), sku="HT-BT-100", name="Golden Tippy Orthodox Black Tea (100g)", quantity=1, unit_price=950.0, subtotal=950.0),
-            OrderItem(org_id="org_a", order_id="ORD-1002", product_id=prod_map.get("HT-OL-100", 3), sku="HT-OL-100", name="Shangri-La High Mountain Oolong (100g)", quantity=1, unit_price=1600.0, subtotal=1600.0),
-            OrderItem(org_id="org_a", order_id="ORD-1003", product_id=prod_map.get("HT-GT-100", 4), sku="HT-GT-100", name="Dhankuta Imperial Green Pearls (100g)", quantity=1, unit_price=1200.0, subtotal=1200.0),
-        ]
-        session.add_all(order_items_to_seed)
+    await engine.dispose()
+    if indexed_all:
+        mode = f"Chroma vectors ({settings.GEMINI_EMBEDDING_MODEL})"
+    elif kb.embeddings_enabled():
+        mode = "BM25 lexical fallback (embedding calls failed, see above)"
+    else:
+        mode = "BM25 lexical retrieval (EMBEDDING_PROVIDER is not gemini or GEMINI_API_KEY is empty)"
+    print(f"[SUCCESS] Database and knowledge bases seeded. Retrieval: {mode}.")
 
-        # Seed initial inventory events
-        inv_events = [
-            InventoryEvent(org_id="org_a", product_id=prod_map.get("HT-SN-100", 1), sku="HT-SN-100", delta=-1, reason="order_created", stock_after=40),
-            InventoryEvent(org_id="org_a", product_id=prod_map.get("HT-BT-100", 2), sku="HT-BT-100", delta=-1, reason="order_created", stock_after=65),
-            InventoryEvent(org_id="org_a", product_id=prod_map.get("HT-OL-100", 3), sku="HT-OL-100", delta=-1, reason="order_created", stock_after=50),
-            InventoryEvent(org_id="org_a", product_id=prod_map.get("HT-GT-100", 4), sku="HT-GT-100", delta=-1, reason="order_created", stock_after=80),
-        ]
-        session.add_all(inv_events)
-
-        # Order histories
-        session.add(OrderStatusHistory(order_id="ORD-1001", old_status="pending", new_status="confirmed", changed_by="Store Manager", reason="Payment confirmed"))
-        session.add(OrderStatusHistory(order_id="ORD-1002", old_status="confirmed", new_status="delivered", changed_by="Courier Delivery Agent", reason="Signed upon delivery"))
-        session.add(OrderStatusHistory(order_id="ORD-1003", old_status="none", new_status="pending", changed_by="Customer", reason="Cart order placement"))
-        await session.commit()
-
-        # 6. Conversations & Past Bookings for Org B Customers (Rule: 3 customers, 2 with past bookings)
-        print(" -> Seeding Conversations and Past Bookings for Org B customers...")
-        conv_b1 = Conversation(
-            id="conv_seed_b1",
-            org_id="org_b",
-            user_id="user_b1",
-            title="Therapeutic Massage Consultation",
-            agent_type="customer"
-        )
-        conv_b2 = Conversation(
-            id="conv_seed_b2",
-            org_id="org_b",
-            user_id="user_b2",
-            title="Sports Rehab Followup",
-            agent_type="customer"
-        )
-        conv_b3 = Conversation(
-            id="conv_seed_b3",
-            org_id="org_b",
-            user_id="user_b3",
-            title="Yoga Schedule Inquiry",
-            agent_type="customer"
-        )
-        session.add_all([conv_b1, conv_b2, conv_b3])
-        await session.commit()
-
-        import datetime
-        b1 = Booking(
-            id="BKG-2001",
-            org_id="org_b",
-            user_id="user_b1",
-            conversation_id=conv_b1.id,
-            service_id="srv_1",
-            practitioner_id="prac_2",
-            start_time=datetime.datetime(2026, 11, 2, 10, 0, 0),
-            end_time=datetime.datetime(2026, 11, 2, 11, 0, 0),
-            status="confirmed",
-            notes="Focus on upper trapezius stiffness."
-        )
-        b2 = Booking(
-            id="BKG-2002",
-            org_id="org_b",
-            user_id="user_b2",
-            conversation_id=conv_b2.id,
-            service_id="srv_3",
-            practitioner_id="prac_1",
-            start_time=datetime.datetime(2026, 11, 3, 14, 0, 0),
-            end_time=datetime.datetime(2026, 11, 3, 14, 45, 0),
-            status="confirmed",
-            notes="Post-knee arthroscopy follow-up."
-        )
-        session.add(b1)
-        session.add(b2)
-        await session.commit()
-
-        # 7. Customer Memories
-        session.add(CustomerMemory(org_id="org_a", user_id="user_a1", memory_key="usual_tea", memory_value="Himalayan Spring Silver Needle (100g)"))
-        session.add(CustomerMemory(org_id="org_b", user_id="user_b1", memory_key="preferred_practitioner", memory_value="Master Tenzing Norbu"))
-        await session.commit()
-
-        # 8. Load Knowledge Base Documents & Vectors
-        print(" -> Ingesting and embedding Knowledge Base for Org A...")
-        org_a_kb_dir = backend_dir / "app" / "seed_data" / "org_a_knowledge"
-        for md_file in org_a_kb_dir.glob("*.md"):
-            chunks = parse_markdown_chunks(md_file, md_file.name)
-            for ch in chunks:
-                emb = await get_embedding(ch["content"])
-                session.add(KnowledgeChunk(
-                    org_id="org_a",
-                    doc_name=ch["doc_name"],
-                    section_name=ch["section_name"],
-                    content=ch["content"],
-                    embedding_json=json.dumps(emb)
-                ))
-
-        print(" -> Ingesting and embedding Knowledge Base for Org B...")
-        org_b_kb_dir = backend_dir / "app" / "seed_data" / "org_b_knowledge"
-        for md_file in org_b_kb_dir.glob("*.md"):
-            chunks = parse_markdown_chunks(md_file, md_file.name)
-            for ch in chunks:
-                emb = await get_embedding(ch["content"])
-                session.add(KnowledgeChunk(
-                    org_id="org_b",
-                    doc_name=ch["doc_name"],
-                    section_name=ch["section_name"],
-                    content=ch["content"],
-                    embedding_json=json.dumps(emb)
-                ))
-
-        await session.commit()
-
-    print("[SUCCESS] Database and Knowledge Bases successfully seeded!")
 
 if __name__ == "__main__":
-    asyncio.run(seed())
+    asyncio.run(seed(if_missing="--if-missing" in sys.argv))

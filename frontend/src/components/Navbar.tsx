@@ -19,7 +19,7 @@ export const Navbar: React.FC<NavbarProps> = ({
   onToggleSidebar,
   onLogout,
 }) => {
-  const isOrgA = org.id === 'org_a'
+  const isRetail = org.agent_kind !== 'studio'
 
   return (
     <header className="h-16 border-b border-slate-800 bg-slate-900/90 backdrop-blur-md px-4 flex items-center justify-between z-30 shrink-0">
@@ -63,16 +63,18 @@ export const Navbar: React.FC<NavbarProps> = ({
         {/* Customer Drawer (My Orders / My Bookings) */}
         <button
           onClick={onOpenDrawer}
+          aria-label={user.role === 'admin' ? (isRetail ? 'Orders' : 'Bookings') : isRetail ? 'My orders' : 'My bookings'}
           className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-xs font-medium bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700/60 transition active:scale-95"
         >
-          {isOrgA ? <Package className="w-4 h-4 text-emerald-400" /> : <Calendar className="w-4 h-4 text-teal-400" />}
-          <span className="hidden sm:inline">{isOrgA ? 'My Orders' : 'My Bookings'}</span>
+          {isRetail ? <Package className="w-4 h-4 text-emerald-400" /> : <Calendar className="w-4 h-4 text-teal-400" />}
+          <span className="hidden sm:inline">{user.role === 'admin' ? (isRetail ? 'Orders' : 'Bookings') : isRetail ? 'My Orders' : 'My Bookings'}</span>
         </button>
 
         {/* Admin Analytics Button */}
         {user.role === 'admin' && (
           <button
             onClick={onOpenAdminModal}
+            aria-label="Analytics"
             className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-xs font-medium bg-purple-950/60 hover:bg-purple-900/80 text-purple-300 border border-purple-500/40 transition active:scale-95 shadow-sm"
           >
             <BarChart3 className="w-4 h-4 text-purple-400" />
@@ -95,7 +97,7 @@ export const Navbar: React.FC<NavbarProps> = ({
         <button
           onClick={onLogout}
           className="p-2 rounded-xl text-slate-400 hover:text-rose-400 hover:bg-slate-800/80 transition"
-          title="Sign out"
+          title="Sign out" aria-label="Sign out"
         >
           <LogOut className="w-4 h-4" />
         </button>
